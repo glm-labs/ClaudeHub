@@ -368,7 +368,13 @@ final class TabsModel: ObservableObject {
               moved.cwd == landing.cwd
         else { return }
 
-        if drag?.tab != id { drag = (id, groups[pane]) }
+        // A new drag, or one whose snapshot no longer describes this pane — a
+        // tab opened or closed while it was in the air, or a drag let go over
+        // nothing, which never reaches `endMove`. Measuring from a snapshot
+        // that is no longer true is how a drag stops appearing to do anything.
+        if drag?.tab != id || Set(drag?.order ?? []) != Set(groups[pane]) {
+            drag = (id, groups[pane])
+        }
         guard let order = drag?.order,
               let placed = Self.placing(id, onto: target, in: order),
               placed != groups[pane]

@@ -982,8 +982,19 @@ private struct TabStrip: View {
                         // pointer, so where it will land is never a guess.
                         .opacity(dragging == tab.id ? 0.45 : 1)
                         .onDrag {
-                            dragging = tab.id
-                            return NSItemProvider(object: tab.id as NSString)
+                            let carried = NSItemProvider(object: tab.id as NSString)
+                            // Not written down here. This closure runs while
+                            // AppKit is starting the drag, and marking the chip
+                            // faded is a view update in the middle of that —
+                            // which takes the drag down with it. The first one
+                            // survives it; the ones after find no session left
+                            // to start. So the note is left for the next turn
+                            // of the loop, by which time the drag is under way.
+                            DispatchQueue.main.async {
+                                tabs.endMove()      // a drag let go over nothing leaves its own behind
+                                dragging = tab.id
+                            }
+                            return carried
                         }
                         .onDrop(of: [.text],
                                 delegate: TabReorder(target: tab.id,
@@ -1008,7 +1019,12 @@ private struct TabReorder: DropDelegate {
     @Binding var dragging: String?
     let tabs: TabsModel
 
-    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+    /// Asked before this app has said which tab is moving, so it answers for
+    /// the drag rather than for our note about it: a chip carries plain text,
+    /// and nothing else offered to the strip does.
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.text])
+    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
 
