@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var store: SessionStore
@@ -919,6 +920,8 @@ private struct TabStrip: View {
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var accounts: AccountStore
+    /// The tab under the pointer while it is being dragged somewhere else.
+    @State private var dragging: String?
 
     private var sections: [(folder: String, tabs: [TerminalTab])] {
         var order: [String] = []
@@ -973,11 +976,51 @@ private struct TabStrip: View {
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
                         )
+                        // Drag a tab along its neighbours to order them the way
+                        // the work is, rather than the order they happened to
+                        // be opened in. The strip re-lays itself out under the
+                        // pointer, so where it will land is never a guess.
+                        .opacity(dragging == tab.id ? 0.45 : 1)
+                        .onDrag {
+                            dragging = tab.id
+                            return NSItemProvider(object: tab.id as NSString)
+                        }
+                        .onDrop(of: [.text],
+                                delegate: TabReorder(target: tab.id,
+                                                     dragging: $dragging,
+                                                     tabs: tabs))
                     }
                 }
             }
             .padding(.vertical, 5)
         }
+    }
+}
+
+/// Reordering by drag, one neighbour at a time.
+///
+/// The move happens on the way in rather than on the drop, so the strip is
+/// showing the order you would get before you let go — and `move` itself keeps
+/// a tab inside its own project, which is what makes hovering over another
+/// project's tabs harmless rather than something to guard against here.
+private struct TabReorder: DropDelegate {
+    let target: String
+    @Binding var dragging: String?
+    let tabs: TabsModel
+
+    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target else { return }
+        withAnimation(.easeInOut(duration: 0.15)) { tabs.move(dragging, onto: target) }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        tabs.endMove()
+        return true
     }
 }
 

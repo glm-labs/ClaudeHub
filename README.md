@@ -38,7 +38,9 @@ off.
 - ⚡ **One-click resume** — opens the session in an embedded terminal
   ([SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)), already in the
   right folder
-- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch
+- 🧵 **Tabs** — every session gets a tab; terminals stay alive when you switch,
+  and **dragging one along its neighbours** orders a project's tabs the way
+  the work is rather than the order you happened to open them in
 - ✨ **Start a new chat anywhere** — `⌘N` starts a fresh Claude session in the
   current folder, `⇧⌘N` in any folder you pick; the `+` in the toolbar also
   lists your projects, and every project row has its own `+`. `⌘T` opens a
