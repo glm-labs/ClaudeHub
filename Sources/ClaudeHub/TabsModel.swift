@@ -342,44 +342,34 @@ final class TabsModel: ObservableObject {
 
     // MARK: - Order
 
-    /// Where the tabs stood when the drag began, and which tab is being
-    /// dragged. Every hover is worked out from this rather than from where the
-    /// tabs stand now: the strip re-lays out under a pointer that has not
-    /// moved, so the same neighbour is entered twice, and an answer that
-    /// depends on the current order sends the tab back and forth between them.
-    private var drag: (tab: String, order: [String])?
-
-    /// Drag one tab onto another to put it there, within its own project.
+    /// Drop one tab on another to put it there, within its own project.
     ///
     /// The strip groups tabs by folder, so a tab let go among another project's
     /// tabs would spring straight back to its own group the moment the strip
     /// redrew — ordering is a thing you do inside a project, which is also the
-    /// only place it says anything. A tab that started left of the one it is
-    /// dropped on lands after it, one that started right of it lands before:
-    /// either way it ends up where the pointer is.
+    /// only place it says anything. Such a drop is refused, and says so by
+    /// bouncing back rather than by quietly doing nothing.
+    ///
+    /// A tab dragged from the left lands after the one it is dropped on, one
+    /// from the right lands before it: either way it ends up where you let go.
     ///
     /// Both orders move together. The strip draws its pane's list, and the Tabs
     /// menu counts through `tabs`; a window where the fourth tab along is not
-    /// the one Command-4 opens would be worse than an unsorted strip.
-    func move(_ id: String, onto target: String) {
+    /// the one Command-4 opens would be worse than an unsorted strip. Tabs in
+    /// other panes keep the places they held.
+    @discardableResult
+    func move(_ id: String, onto target: String) -> Bool {
         guard id != target,
               let pane = group(of: id), group(of: target) == pane,
               let moved = tab(withID: id), let landing = tab(withID: target),
-              moved.cwd == landing.cwd
-        else { return }
-
-        if drag?.tab != id { drag = (id, groups[pane]) }
-        guard let order = drag?.order,
-              let placed = Self.placing(id, onto: target, in: order),
-              placed != groups[pane]
-        else { return }
+              moved.cwd == landing.cwd,
+              let placed = Self.placing(id, onto: target, in: groups[pane])
+        else { return false }
 
         groups[pane] = placed
         restack(placed)
+        return true
     }
-
-    /// The drag is over. The next one is measured from where things stand then.
-    func endMove() { drag = nil }
 
     /// `order` with `id` taken out and put back at `target`.
     static func placing(_ id: String, onto target: String, in order: [String]) -> [String]? {

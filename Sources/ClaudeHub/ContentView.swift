@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var store: SessionStore
@@ -920,8 +919,8 @@ private struct TabStrip: View {
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var accounts: AccountStore
-    /// The tab under the pointer while it is being dragged somewhere else.
-    @State private var dragging: String?
+    /// The chip the pointer is over while a tab is being dragged.
+    @State private var landing: String?
 
     private var sections: [(folder: String, tabs: [TerminalTab])] {
         var order: [String] = []
@@ -976,51 +975,32 @@ private struct TabStrip: View {
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
                         )
-                        // Drag a tab along its neighbours to order them the way
-                        // the work is, rather than the order they happened to
-                        // be opened in. The strip re-lays itself out under the
-                        // pointer, so where it will land is never a guess.
-                        .opacity(dragging == tab.id ? 0.45 : 1)
-                        .onDrag {
-                            dragging = tab.id
-                            return NSItemProvider(object: tab.id as NSString)
+                        // Drop a tab on one of its neighbours to put it there,
+                        // so a project's tabs stand in the order the work is in
+                        // rather than the order they were opened in. The chip
+                        // is already draggable — that is what carries a tab to
+                        // another pane — so this is the same drag, landing
+                        // somewhere new.
+                        .dropDestination(for: String.self) { ids, _ in
+                            guard let id = ids.first else { return false }
+                            return tabs.move(id, onto: tab.id)
+                        } isTargeted: { landing = $0 ? tab.id : (landing == tab.id ? nil : landing) }
+                        .overlay {
+                            // The chip you are over is the place you are taking:
+                            // a tab coming from the left slides in past it, one
+                            // from the right in front of it, and either way this
+                            // is where the pointer let go.
+                            if landing == tab.id {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                            }
                         }
-                        .onDrop(of: [.text],
-                                delegate: TabReorder(target: tab.id,
-                                                     dragging: $dragging,
-                                                     tabs: tabs))
+                        .animation(.easeOut(duration: 0.12), value: landing)
                     }
                 }
             }
             .padding(.vertical, 5)
         }
-    }
-}
-
-/// Reordering by drag, one neighbour at a time.
-///
-/// The move happens on the way in rather than on the drop, so the strip is
-/// showing the order you would get before you let go — and `move` itself keeps
-/// a tab inside its own project, which is what makes hovering over another
-/// project's tabs harmless rather than something to guard against here.
-private struct TabReorder: DropDelegate {
-    let target: String
-    @Binding var dragging: String?
-    let tabs: TabsModel
-
-    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
-
-    func dropEntered(info: DropInfo) {
-        guard let dragging, dragging != target else { return }
-        withAnimation(.easeInOut(duration: 0.15)) { tabs.move(dragging, onto: target) }
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        dragging = nil
-        tabs.endMove()
-        return true
     }
 }
 
