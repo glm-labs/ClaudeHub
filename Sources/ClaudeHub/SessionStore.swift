@@ -172,6 +172,15 @@ final class SessionStore: ObservableObject {
 
     // MARK: - JSONL parsing
 
+    /// Enough of the start of a transcript to read its opening state, and
+    /// enough of the end to read where the conversation got to.
+    private static let headLength = 256 * 1024
+    private static let tailLength = 64 * 1024
+    /// How far past the head `findCwd` keeps looking before giving up. Well
+    /// past any run of pasted images, and far short of reading a whole
+    /// multi-gigabyte transcript.
+    private static let cwdScanLimit = 32 * 1024 * 1024
+
     private static func parseSession(file: URL, fallbackCwd: String? = nil) -> ClaudeSession? {
         let id = file.deletingPathExtension().lastPathComponent
         // Session transcripts are named by UUID; skip anything else (e.g. agent sidechains)
@@ -184,12 +193,11 @@ final class SessionStore: ObservableObject {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
 
-        let headData = (try? handle.read(upToCount: 256 * 1024)) ?? Data()
+        let headData = (try? handle.read(upToCount: headLength)) ?? Data()
         let head = String(decoding: headData, as: UTF8.self)
 
         var tail = ""
-        let tailLength = 64 * 1024
-        if size > 256 * 1024 {
+        if size > headLength {
             try? handle.seek(toOffset: UInt64(max(0, size - tailLength)))
             if let tailData = try? handle.readToEnd() {
                 tail = String(decoding: tailData, as: UTF8.self)
@@ -207,7 +215,7 @@ final class SessionStore: ObservableObject {
         // cwd is what a session is filed under. Without one in the file, the
         // folder it sits in speaks for it — but only for a session that has
         // something to show for itself.
-        let named = firstJSONString(in: head, key: "cwd").flatMap { $0.isEmpty ? nil : $0 }
+        let named = findCwd(in: handle, head: head, size: size)
         guard let cwd = named ?? fallbackCwd else { return nil }
 
         let title = lastJSONString(in: tail, key: "aiTitle")
@@ -274,6 +282,49 @@ final class SessionStore: ObservableObject {
 
     private static func isoDate(_ text: String) -> Date? {
         isoWithMilliseconds.date(from: text) ?? isoWholeSeconds.date(from: text)
+    }
+
+    /// The folder a session started in: the `cwd` on the first line that names
+    /// one.
+    ///
+    /// Usually that line sits within the first few kilobytes. But a chat that
+    /// opens with a pasted screenshot writes the image inline — one line of
+    /// base64 that can run to hundreds of kilobytes and carries the folder past
+    /// the head we read. A session filed under nothing drops out of the sidebar
+    /// completely, transcript and all, so when the head comes up empty, keep
+    /// reading rather than give up on it.
+    ///
+    /// It has to be the *first* one. Later lines carry a `cwd` too, but that is
+    /// wherever the session had walked to by then — a subfolder, or a scratch
+    /// directory outside the project altogether — and filing a session there
+    /// would only move it out of sight a second way.
+    private static func findCwd(in handle: FileHandle, head: String, size: Int) -> String? {
+        if let cwd = completeJSONString(in: head, key: "cwd") { return cwd }
+        guard size > headLength else { return nil }
+
+        var offset = UInt64(headLength)
+        let limit = UInt64(min(size, cwdScanLimit))
+        // A chunk boundary can fall inside the key, or inside the path itself,
+        // so every read starts again a little before the last one ended.
+        var carry = ""
+        while offset < limit {
+            try? handle.seek(toOffset: offset)
+            guard let data = try? handle.read(upToCount: headLength),
+                  !data.isEmpty else { return nil }
+            let chunk = carry + String(decoding: data, as: UTF8.self)
+            if let cwd = completeJSONString(in: chunk, key: "cwd") { return cwd }
+            carry = String(chunk.suffix(4096))
+            offset += UInt64(data.count)
+        }
+        return nil
+    }
+
+    /// `firstJSONString`, minus the values that run off the end of the text they
+    /// were found in: a path cut in half by a chunk boundary is not a path.
+    private static func completeJSONString(in text: String, key: String) -> String? {
+        guard let range = text.range(of: "\"\(key)\":\""),
+              text[range.upperBound...].contains("\"") else { return nil }
+        return firstJSONString(in: text, key: key).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Extracts the raw token following `"key":` (for booleans/numbers).
