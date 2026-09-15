@@ -50,6 +50,36 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(Array(hiddenSessionIDs), forKey: "hiddenSessionIDs")
     }
 
+    // MARK: - Pinning
+
+    /// Pinned chats sit at the top of their project, above everything the last
+    /// hour of work pushed up there. Nothing else about them changes: the pin
+    /// is ours, the transcript on disk knows nothing about it.
+    @Published var pinnedSessionIDs: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "pinnedSessionIDs") ?? [])
+
+    func setPinned(_ session: ClaudeSession, _ pinned: Bool) {
+        if pinned {
+            pinnedSessionIDs.insert(session.id)
+        } else {
+            pinnedSessionIDs.remove(session.id)
+        }
+        persistPinned()
+    }
+
+    /// Pinned first, and within each half the order they already had — the most
+    /// recently active first.
+    func ordered(_ sessions: [ClaudeSession]) -> [ClaudeSession] {
+        guard !pinnedSessionIDs.isEmpty else { return sessions }
+        let pinned = sessions.filter { pinnedSessionIDs.contains($0.id) }
+        guard !pinned.isEmpty else { return sessions }
+        return pinned + sessions.filter { !pinnedSessionIDs.contains($0.id) }
+    }
+
+    private func persistPinned() {
+        UserDefaults.standard.set(Array(pinnedSessionIDs), forKey: "pinnedSessionIDs")
+    }
+
     // MARK: - Deleting
 
     /// Deletes sessions for real: the transcript and its sidecar files go to
@@ -78,6 +108,10 @@ final class SessionStore: ObservableObject {
         if !hiddenSessionIDs.isDisjoint(with: deleted) {
             hiddenSessionIDs.subtract(deleted)
             persistHidden()
+        }
+        if !pinnedSessionIDs.isDisjoint(with: deleted) {
+            pinnedSessionIDs.subtract(deleted)
+            persistPinned()
         }
         return failed
     }
