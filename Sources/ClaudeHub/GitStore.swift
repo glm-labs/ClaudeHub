@@ -72,6 +72,11 @@ final class GitStore: ObservableObject {
     /// Project folder → the repositories in it, so the filesystem is walked
     /// once per folder and never on the main thread.
     private var rootCache: [String: [String]] = [:]
+    /// The same thing already answered: every project header in the sidebar
+    /// asks for its repositories while the list is being laid out, so the
+    /// answer is worked out when a scan changes something, not per project per
+    /// pass.
+    private var byProject: [String: [RepoStatus]] = [:]
     private var timer: Timer?
     private var scanning = false
     private let queue = DispatchQueue(label: "be.optimize.claudehub.git", qos: .utility)
@@ -85,8 +90,21 @@ final class GitStore: ObservableObject {
     /// sidebar is often a container — `fytolog` holds five repos, `PERSOONLIJK`
     /// holds this one — so this is a list, not a single answer.
     func repos(forProjectAt path: String) -> [RepoStatus] {
-        let roots = rootCache[path] ?? []
-        return repos.filter { roots.contains($0.root) }
+        byProject[path] ?? []
+    }
+
+    /// Walks `repos` rather than the cache, so each project keeps the order
+    /// the scan put its repositories in — the busiest first.
+    private func indexByProject() {
+        var owners: [String: [String]] = [:]
+        for (path, roots) in rootCache {
+            for root in roots { owners[root, default: []].append(path) }
+        }
+        var index: [String: [RepoStatus]] = [:]
+        for repo in repos {
+            for path in owners[repo.root] ?? [] { index[path, default: []].append(repo) }
+        }
+        byProject = index
     }
 
     /// Refreshed on a slow timer, and only while the window is in front: a
@@ -109,6 +127,7 @@ final class GitStore: ObservableObject {
             for path in unknown { found[path] = Self.repositories(in: path) }
             DispatchQueue.main.async {
                 for (path, roots) in found { self.rootCache[path] = roots }
+                self.indexByProject()
                 let unique = Array(Set(self.rootCache.values.flatMap { $0 })).sorted()
                 guard unique != self.roots else { return }
                 self.roots = unique
@@ -128,7 +147,9 @@ final class GitStore: ObservableObject {
             DispatchQueue.main.async {
                 self.scanning = false
                 let sorted = statuses.sorted { ($0.pending, $1.name) > ($1.pending, $0.name) }
-                if sorted != self.repos { self.repos = sorted }
+                guard sorted != self.repos else { return }
+                self.repos = sorted
+                self.indexByProject()
             }
         }
     }
