@@ -84,11 +84,14 @@ enum TokenCheck {
             var headers: [String: String] = [:]
             if let http = response as? HTTPURLResponse {
                 headers = rateLimits(in: http)
-                // Nothing to show is the case worth being able to look into
-                // afterwards; a working read needs no record.
-                if headers.isEmpty {
-                    log(status: http.statusCode, response: http, error: message(in: data))
-                }
+                // Every read is written down, not only the empty ones. A number
+                // that looks wrong on screen can only be answered against what
+                // the API actually said at that moment — guessing at it
+                // afterwards is how an afternoon goes. Only the rate-limit
+                // headers are kept: no token, no ids.
+                log(status: http.statusCode, response: http,
+                    error: headers.isEmpty ? message(in: data) : nil,
+                    limits: headers)
             }
             DispatchQueue.main.async { completion(headers) }
         }.resume()
@@ -150,23 +153,35 @@ enum TokenCheck {
         DispatchQueue.main.async { completion(result) }
     }
 
-    /// Written only when a limits read comes back with nothing usable — the
-    /// header names are not documented, so this is what makes a change in them
-    /// knowable instead of a mystery.
-    private static func log(status: Int, response: HTTPURLResponse, error: String?) {
+    /// What the API said about the limits, every time it is asked.
+    ///
+    /// The header names are not documented, so this is what makes a change in
+    /// them knowable instead of a mystery — and a bar that reads wrong
+    /// answerable, which a reading kept only in memory never is. A read that
+    /// comes back with nothing usable says so and names the headers it did
+    /// get. Rate-limit headers only: no token, no organisation or request ids.
+    private static func log(status: Int,
+                            response: HTTPURLResponse,
+                            error: String?,
+                            limits: [String: String]) {
         let folder = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/ClaudeHub")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let names = response.allHeaderFields.keys.compactMap { $0 as? String }.sorted()
+        let body = limits.isEmpty
+            ? "headers: " + response.allHeaderFields.keys
+                .compactMap { $0 as? String }.sorted().joined(separator: ", ")
+            : limits.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+                .joined(separator: "\n")
         let entry = """
 
-            ===== \(Date()) — no rate-limit headers =====
+            ===== \(Date()) — \(limits.isEmpty ? "no rate-limit headers" : "limits read") =====
             status: \(status)
-            \(error.map { "error: \($0)\n" } ?? "")headers: \(names.joined(separator: ", "))
+            \(error.map { "error: \($0)\n" } ?? "")\(body)
 
             """
         guard let data = entry.data(using: .utf8) else { return }
         let file = folder.appendingPathComponent("token-check.log")
+        trim(file)
         if let handle = try? FileHandle(forWritingTo: file) {
             handle.seekToEndOfFile()
             handle.write(data)
@@ -174,5 +189,14 @@ enum TokenCheck {
         } else {
             try? data.write(to: file)
         }
+    }
+
+    /// A read a minute adds up; half a megabyte is days of history, and the
+    /// oldest half goes rather than the file growing for the life of the app.
+    private static func trim(_ file: URL) {
+        guard let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 512_000,
+              let data = try? Data(contentsOf: file) else { return }
+        try? data.suffix(256_000).write(to: file)
     }
 }
