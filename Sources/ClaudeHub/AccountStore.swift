@@ -393,6 +393,19 @@ final class AccountStore: ObservableObject {
         return token.caseInsensitiveCompare(signedIn) != .orderedSame
     }
 
+    /// A saved account that is checked to be the signed-in account itself, and
+    /// can run — the menu lists it in place of the signed-in row instead of
+    /// showing the same account twice.
+    ///
+    /// A locked or rejected twin does not count: hiding the signed-in row
+    /// behind it would leave no working way onto that account.
+    var signedInTwin: String? {
+        tokenProfiles.first { profile in
+            let status = self.status(of: profile)
+            return isDistinctAccount(profile) == false && !status.locked && status.problem == nil
+        }
+    }
+
     /// One sentence on whose account a saved token turned out to be.
     func identity(of profile: String) -> String {
         switch isDistinctAccount(profile) {

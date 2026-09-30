@@ -220,7 +220,9 @@ struct AccountItems: View {
         }
 
         Section("Sessions run as") {
-            item(label: signedInLabel, profile: nil)
+            if accounts.signedInTwin == nil {
+                item(label: signedInLabel, profile: nil)
+            }
             ForEach(accounts.tokenProfiles, id: \.self) { profile in
                 item(label: menuLabel(for: profile), profile: profile)
             }
@@ -311,20 +313,34 @@ struct AccountItems: View {
     }
 
     /// Worked out once per menu build, not once per row.
+    ///
+    /// With the signed-in row hidden behind its twin, the arrow must land on a
+    /// row that is actually there, so the signed-in account is left out.
     private var roomiest: AccountStore.RoomiestAccount? {
-        accounts.roomiest(signedIn: (usage.signedInSession, usage.signedInWeek))
+        guard accounts.signedInTwin == nil else { return accounts.roomiest(signedIn: (nil, nil)) }
+        return accounts.roomiest(signedIn: (usage.signedInSession, usage.signedInWeek))
     }
 
     private var brokenProfile: String? {
         accounts.tokenProfiles.first { accounts.status(of: $0).problem != nil }
     }
 
+    /// Running as the signed-in account checks its twin, since that is the row
+    /// standing in for it.
+    private func isChecked(_ profile: String?) -> Bool {
+        if accounts.activeProfile == profile { return true }
+        return accounts.activeProfile == nil && profile != nil && profile == accounts.signedInTwin
+    }
+
     @ViewBuilder
     private func item(label: String, profile: String?) -> some View {
         Button {
+            // Picking an account restarts every conversation on it; the one
+            // you are already on has nothing to move to.
+            guard !isChecked(profile) else { return }
             accounts.setActive(profile)
         } label: {
-            if accounts.activeProfile == profile {
+            if isChecked(profile) {
                 Label(label, systemImage: "checkmark")
             } else {
                 Text(label)
