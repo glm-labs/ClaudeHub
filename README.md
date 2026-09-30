@@ -96,7 +96,10 @@ off.
   Mail or Photos, or a bare image from a browser: drop it on the terminal and
   its escaped path is typed at the prompt, ready to ask about
 - 🖱️ **⌘-click paths** — `src/Foo.swift:42` in Claude's output opens in
-  VS Code at that line; URLs open in the browser
+  VS Code at that line; URLs open in the browser; an image, PDF, or recording
+  opens in its own app (Preview), not as a screenful of bytes
+- 📌 **Pin chats** — right-click → *Pin Chat to Top* keeps the conversation
+  you live in above everything newer work pushes up
 - 🔍 Search across projects and session titles, open the folder in VS Code,
   hand-off to Terminal.app, reveal in Finder, copy resume command
 
