@@ -14,10 +14,13 @@ final class TerminalManager: NSObject, ObservableObject {
     /// What each tab's terminal is doing right now, refreshed on a timer by
     /// reading the visible screen — see `TerminalActivity`.
     @Published private(set) var activity: [String: TerminalActivity] = [:]
-    /// Drives every pulsing dot from one clock: they breathe in step, and no
-    /// row has to mutate its own state while the table is laying it out.
-    @Published private(set) var pulse = false
     private var activityTimer: Timer?
+    /// Which beat of `activityTimer` we are on, so the tabs you are not
+    /// looking at can be read on a slower one.
+    private var tick = 0
+    /// How many beats a background tab waits before it is read again —
+    /// roughly three seconds at 0.7s a beat.
+    private static let backgroundEvery = 4
 
     private var terminals: [String: LocalProcessTerminalView] = [:]
     /// The saved account each live terminal was actually launched with (nil =
@@ -78,6 +81,14 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
+    /// The children of closed tabs whose exit nobody has read yet.
+    ///
+    /// SwiftTerm's `terminate()` sends the SIGTERM and then cancels the monitor
+    /// that would have reaped the child, so nothing is left to call `waitpid`
+    /// and the dead shell keeps its slot in the process table. One of those per
+    /// closed tab goes unnoticed; a fortnight of closing tabs and switching
+    /// accounts — which restarts every conversation — is hundreds of them.
+    private var reaping: Set<pid_t> = []
     private(set) var claudePath: String = "claude"
 
     /// The bundled zoetrope binary (Resources/bin/zoe) — the session flow
@@ -458,6 +469,7 @@ final class TerminalManager: NSObject, ObservableObject {
             // replay binds the new ones. The image files stay: the plan holds
             // them.
             PasteMemory.shared.forget(tab: tab.id, deletingImages: false)
+            trackForReaping(view)
             view.terminate()
         }
         launchedProfile[tab.id] = nil
@@ -537,6 +549,7 @@ final class TerminalManager: NSObject, ObservableObject {
     func closeTerminal(for tabID: String) {
         folders[tabID] = nil
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
+            trackForReaping(view)
             view.terminate()
         }
         launchedProfile[tabID] = nil
@@ -613,14 +626,29 @@ final class TerminalManager: NSObject, ObservableObject {
     /// what the session is showing: while it works it prints an
     /// "esc to interrupt" hint, and permission prompts ask "Do you want to …".
     private func pollActivity() {
+        reapClosedChildren()
         guard !terminals.isEmpty else {
             if !activity.isEmpty { activity = [:] }
+            PulseClock.shared.stop()
             return
         }
+        tick &+= 1
+        // Reading a terminal means walking every row on its screen and building
+        // a string out of it, which is the most expensive thing here that runs
+        // on a clock. The tab in front of you is worth that every beat; the
+        // forty behind it are not, and a dot that settles two seconds late is
+        // not a dot anyone is watching.
+        let slowBeat = tick % Self.backgroundEvery == 0
         var next: [String: TerminalActivity] = [:]
         var finished: [String] = []
         for (id, view) in terminals where !deadTabs.contains(id) {
-            let state = Self.classify(Self.visibleText(of: view))
+            if !slowBeat, !visibleTabs.contains(id), let known = activity[id] {
+                next[id] = known
+                continue
+            }
+            // One read, two questions asked of it.
+            let screen = Self.visibleText(of: view)
+            let state = Self.classify(screen)
             if state == .busy, activity[id] != .busy { busySince[id] = Date() }
 
             // The moment an answer lands: working a second ago, quiet now.
@@ -640,7 +668,7 @@ final class TerminalManager: NSObject, ObservableObject {
             // It is read off the screen, and the screen keeps it long after the
             // window has reset, so it counts only while the reset it names is
             // still ahead and the session is not plainly working.
-            let notice = state == .busy ? nil : Self.limitNotice(in: Self.visibleText(of: view))
+            let notice = state == .busy ? nil : Self.limitNotice(in: screen)
             if limitNotices[id] != notice { limitNotices[id] = notice }
         }
         if next != activity { activity = next }
@@ -651,10 +679,24 @@ final class TerminalManager: NSObject, ObservableObject {
         applyDeferredSwitches()
         restoreDrafts()
         if next.values.contains(where: \.pulses) {
-            pulse.toggle()
-        } else if pulse {
-            pulse = false
+            PulseClock.shared.blink()
+        } else {
+            PulseClock.shared.stop()
         }
+    }
+
+    /// Non-blocking, so a child still on its way out simply waits for the next
+    /// beat. Anything other than 0 — reaped now, or gone already — is done with.
+    private func reapClosedChildren() {
+        guard !reaping.isEmpty else { return }
+        var status: Int32 = 0
+        reaping = reaping.filter { waitpid($0, &status, WNOHANG) == 0 }
+    }
+
+    /// Call before `terminate()`: afterwards there is nobody left to ask.
+    private func trackForReaping(_ view: LocalProcessTerminalView) {
+        let pid = view.process.shellPid
+        if pid > 0 { reaping.insert(pid) }
     }
 
     /// Puts a kept prompt back, once the new session has an empty prompt to
