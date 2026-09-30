@@ -14,7 +14,9 @@ final class UpdateChecker: ObservableObject {
     @Published var errorMessage: String?
 
     private var downloadURL: URL?
-    private let releasesAPI = URL(string: "https://api.github.com/repos/LouisMylle/ClaudeHub/releases/latest")!
+    // The repo moved to the glm-labs organisation; the old URL redirects,
+    // but a redirect is one deprecation away from a broken updater.
+    private let releasesAPI = URL(string: "https://api.github.com/repos/glm-labs/ClaudeHub/releases/latest")!
 
     static var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
