@@ -1,5 +1,6 @@
 import AppKit
 import SwiftTerm
+import UniformTypeIdentifiers
 import UserNotifications
 
 /// Keeps one live terminal per tab so switching in the sidebar
@@ -238,6 +239,7 @@ final class TerminalManager: NSObject, ObservableObject {
 
     /// `path`, `path:line`, or `path:line:col` — relative to the tab's folder
     /// — in VS Code when it is installed, else whatever opens that file.
+    /// Anything a text editor has nothing to say about goes to its own app.
     private func openFile(_ token: String, from folder: String) -> Bool {
         let parts = token.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         var path = parts[0]
@@ -252,6 +254,10 @@ final class TerminalManager: NSObject, ObservableObject {
         guard FileManager.default.fileExists(atPath: path) else { return false }
 
         let fileURL = URL(fileURLWithPath: path)
+        if showsInItsOwnApp(fileURL) {
+            NSWorkspace.shared.open(fileURL)
+            return true
+        }
         if let vsCode = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode") {
             if let line,
                let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
@@ -265,6 +271,21 @@ final class TerminalManager: NSObject, ObservableObject {
             NSWorkspace.shared.open(fileURL)
         }
         return true
+    }
+
+    /// An image, a PDF, a recording, an archive: files a text editor has
+    /// nothing to say about. Claude writes a screenshot and prints its path as
+    /// readily as it prints a source file, and clicking that should show the
+    /// picture — in Preview, or in whatever the Finder would use — not open a
+    /// window full of PNG bytes.
+    ///
+    /// SVG is the exception on purpose: it is an image by type and markup in
+    /// practice, and the reason to click one is usually to read it.
+    private func showsInItsOwnApp(_ url: URL) -> Bool {
+        guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+              !type.conforms(to: .svg) else { return false }
+        return [UTType.image, .movie, .audio, .pdf, .archive, .spreadsheet, .presentation]
+            .contains { type.conforms(to: $0) }
     }
 
     /// Terminals whose process is still alive (used by quit protection).
