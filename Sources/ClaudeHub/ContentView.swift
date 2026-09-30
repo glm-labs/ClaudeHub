@@ -25,9 +25,9 @@ struct ContentView: View {
     private var filteredProjects: [ClaudeProject] {
         let visible: [ClaudeProject] = store.projects.compactMap { project in
             var copy = project
-            copy.sessions = project.sessions.filter {
+            copy.sessions = store.ordered(project.sessions.filter {
                 showHiddenSessions || !store.hiddenSessionIDs.contains($0.id)
-            }
+            })
             return copy.sessions.isEmpty ? nil : copy
         }
         guard !searchText.isEmpty else { return visible }
@@ -332,7 +332,8 @@ struct ContentView: View {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
-                                   isHidden: store.hiddenSessionIDs.contains(session.id))
+                                   isHidden: store.hiddenSessionIDs.contains(session.id),
+                                   isPinned: store.pinnedSessionIDs.contains(session.id))
                             .clickable()
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
@@ -767,6 +768,12 @@ struct ContentView: View {
             }
             Divider()
         }
+        if store.pinnedSessionIDs.contains(session.id) {
+            Button("Unpin Chat") { store.setPinned(session, false) }
+        } else {
+            Button("Pin Chat to Top") { store.setPinned(session, true) }
+        }
+        Divider()
         Button("New Session in This Folder") { newSession(in: session.cwd) }
         Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
         Divider()
@@ -1588,6 +1595,7 @@ private struct SessionRow: View {
     let session: ClaudeSession
     let activity: TerminalActivity
     let isHidden: Bool
+    let isPinned: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1599,6 +1607,12 @@ private struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // Says why this chat is sitting above older work it did not out-run.
+            if isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+            }
             if isHidden {
                 Image(systemName: "eye.slash")
                     .font(.caption2)
