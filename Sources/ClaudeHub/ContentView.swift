@@ -262,8 +262,21 @@ struct ContentView: View {
             tabs.openSession(session)
         }
         .onChange(of: tabs.activeTabID) { previous, _ in
-            // Keep the sidebar in sync with the active tab (nil for fresh-session tabs)
-            selectedSessionID = tabs.activeTab?.sessionID
+            // Keep the sidebar in sync with the active tab (nil for fresh-session
+            // tabs) — but never from inside the update that brought us here.
+            //
+            // Clicking a row is a round trip: the list writes the selection, that
+            // opens the session, and the tab arriving lands right back here.
+            // Writing the selection again at that point re-enters the update
+            // SwiftUI is still applying, and the sidebar's table ends up walking
+            // rows it has already let go of. Both crashes it takes the app down
+            // with name that pass — `withSelectionUpdateGuard`, and an exception
+            // thrown mid-layout — so the write waits for the next turn of the
+            // loop, and only happens if it would change anything at all.
+            let wanted = tabs.activeTab?.sessionID
+            if wanted != selectedSessionID {
+                DispatchQueue.main.async { selectedSessionID = wanted }
+            }
             syncVisibleTabs()
             // A search belongs to the terminal it was run in.
             if let previous { terminalManager.clearFind(in: previous) }
