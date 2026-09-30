@@ -340,6 +340,63 @@ final class TabsModel: ObservableObject {
         activeTabID.flatMap { group(of: $0) } ?? 0
     }
 
+    // MARK: - Order
+
+    /// Drop one tab on another to put it there, within its own project.
+    ///
+    /// The strip groups tabs by folder, so a tab let go among another project's
+    /// tabs would spring straight back to its own group the moment the strip
+    /// redrew — ordering is a thing you do inside a project, which is also the
+    /// only place it says anything. Such a drop is refused, and says so by
+    /// bouncing back rather than by quietly doing nothing.
+    ///
+    /// A tab dragged from the left lands after the one it is dropped on, one
+    /// from the right lands before it: either way it ends up where you let go.
+    ///
+    /// Both orders move together. The strip draws its pane's list, and the Tabs
+    /// menu counts through `tabs`; a window where the fourth tab along is not
+    /// the one Command-4 opens would be worse than an unsorted strip. Tabs in
+    /// other panes keep the places they held.
+    @discardableResult
+    func move(_ id: String, onto target: String) -> Bool {
+        guard id != target,
+              let pane = group(of: id), group(of: target) == pane,
+              let moved = tab(withID: id), let landing = tab(withID: target),
+              moved.cwd == landing.cwd,
+              let placed = Self.placing(id, onto: target, in: groups[pane])
+        else { return false }
+
+        groups[pane] = placed
+        restack(placed)
+        return true
+    }
+
+    /// `order` with `id` taken out and put back at `target`.
+    static func placing(_ id: String, onto target: String, in order: [String]) -> [String]? {
+        guard let from = order.firstIndex(of: id),
+              let to = order.firstIndex(of: target)
+        else { return nil }
+        var moved = order
+        moved.remove(at: from)
+        guard let landing = moved.firstIndex(of: target) else { return nil }
+        moved.insert(id, at: to > from ? landing + 1 : landing)
+        return moved
+    }
+
+    /// Puts the pane's tabs back into `tabs` in their new order, leaving every
+    /// other pane's tabs in the places they already held.
+    private func restack(_ order: [String]) {
+        let ids = Set(order)
+        let slots = tabs.indices.filter { ids.contains(tabs[$0].id) }
+        let byID = Dictionary(tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var updated = tabs
+        for (slot, id) in zip(slots, order) {
+            guard let tab = byID[id] else { continue }
+            updated[slot] = tab
+        }
+        tabs = updated
+    }
+
     func group(of id: String) -> Int? {
         groups.firstIndex { $0.contains(id) }
     }

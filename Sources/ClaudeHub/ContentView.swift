@@ -932,6 +932,8 @@ private struct TabStrip: View {
     @EnvironmentObject var tabs: TabsModel
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var accounts: AccountStore
+    /// The chip the pointer is over while a tab is being dragged.
+    @State private var landing: String?
 
     private var sections: [(folder: String, tabs: [TerminalTab])] {
         var order: [String] = []
@@ -986,6 +988,27 @@ private struct TabStrip: View {
                             restart: { terminalManager.relaunch(tab) },
                             close: { tabs.close(tab.id) }
                         )
+                        // Drop a tab on one of its neighbours to put it there,
+                        // so a project's tabs stand in the order the work is in
+                        // rather than the order they were opened in. The chip
+                        // is already draggable — that is what carries a tab to
+                        // another pane — so this is the same drag, landing
+                        // somewhere new.
+                        .dropDestination(for: String.self) { ids, _ in
+                            guard let id = ids.first else { return false }
+                            return tabs.move(id, onto: tab.id)
+                        } isTargeted: { landing = $0 ? tab.id : (landing == tab.id ? nil : landing) }
+                        .overlay {
+                            // The chip you are over is the place you are taking:
+                            // a tab coming from the left slides in past it, one
+                            // from the right in front of it, and either way this
+                            // is where the pointer let go.
+                            if landing == tab.id {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: landing)
                     }
                 }
             }
