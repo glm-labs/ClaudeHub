@@ -198,18 +198,35 @@ final class UsageStore: ObservableObject {
     }
 
     private static func window(in headers: [String: String], matching keys: [String]) -> UsageWindow? {
-        func value(_ suffixes: [String]) -> String? {
-            headers.first { name, _ in
-                keys.contains(where: name.contains) && suffixes.contains(where: name.hasSuffix)
-            }?.value
+        /// The least-qualified name that fits, so a plain `…-7d-utilization`
+        /// wins over a `…-7d-opus-utilization` sitting beside it. A dictionary
+        /// has no order of its own, and taking whichever match came first is
+        /// how the same account could read two ways on two polls.
+        func entry(_ suffixes: [String]) -> (name: String, value: String)? {
+            headers
+                .filter { name, _ in
+                    keys.contains(where: name.contains) && suffixes.contains(where: name.hasSuffix)
+                }
+                .min { ($0.key.count, $0.key) < ($1.key.count, $1.key) }
+                .map { (name: $0.key, value: $0.value) }
         }
+        func value(_ suffixes: [String]) -> String? { entry(suffixes)?.value }
 
         let reset = value(["reset", "resets", "reset-at"]).flatMap(parseDate)
         var percent: Int?
-        if let used = value(["utilization", "utilisation", "used", "percent",
-                             "percent-used", "usage"]).flatMap(Double.init) {
-            // Some APIs state utilization as a fraction, some as a percentage.
-            percent = Int((used <= 1 ? used * 100 : used).rounded())
+        if let used = entry(["utilization", "utilisation", "used", "percent",
+                             "percent-used", "usage"]),
+           let number = Double(used.value) {
+            // A `-utilization` header states a fraction: 0.81 is 81%. It does
+            // not stop at 1 — a window you have spent and are running past on
+            // credits comes back as 1.01 — so the old "over 1 must be a
+            // percentage" reading turned a full window into 1% on screen.
+            // Anything else may well be a percentage, and under 1 it can only
+            // sensibly be a fraction.
+            let isFraction = used.name.hasSuffix("utilization")
+                || used.name.hasSuffix("utilisation")
+                || number <= 1
+            percent = Int((isFraction ? number * 100 : number).rounded())
         } else if let limit = value(["limit"]).flatMap(Double.init),
                   let remaining = value(["remaining"]).flatMap(Double.init), limit > 0 {
             percent = Int(((1 - remaining / limit) * 100).rounded())
