@@ -338,10 +338,8 @@ struct ContentView: View {
                 // hover-to-fold toggle sat under the ⊕ and could leave a
                 // project folded with no visible way back. A search shows
                 // every match whatever is folded.
-                Section(isExpanded: Binding(
-                    get: { !searchText.isEmpty || !store.collapsedProjects.contains(project.path) },
-                    set: { store.setCollapsed(project.path, !$0) }
-                )) {
+                Section {
+                    if !searchText.isEmpty || !store.collapsedProjects.contains(project.path) {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
@@ -350,6 +348,7 @@ struct ContentView: View {
                             .clickable()
                             .tag(session.id)
                             .contextMenu { sessionMenu(session) }
+                    }
                     }
                 } header: {
                     ProjectHeader(
@@ -366,6 +365,9 @@ struct ContentView: View {
                         menu: { projectMenu(project) }
                     )
                 }
+                // The system's own hover-to-fold has no visible handle and can
+                // leave a project stuck shut; the chevron does folding instead.
+                .collapsible(false)
                 .textCase(nil)
             }
 
@@ -1690,7 +1692,7 @@ private struct ProjectHeader<MenuContent: View>: View {
                     .frame(width: 12, height: 14)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .padding(.top, 1)
             .help(isExpanded ? "Fold \(project.name)" : "Show \(project.name)'s sessions")
             // The folder is the real thing: drag it into Finder, Terminal or a
