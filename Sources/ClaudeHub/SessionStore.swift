@@ -50,6 +50,18 @@ final class SessionStore: ObservableObject {
         UserDefaults.standard.set(Array(hiddenSessionIDs), forKey: "hiddenSessionIDs")
     }
 
+    // MARK: - Folding
+
+    /// Projects folded shut in the sidebar, by path. Remembered across launches.
+    @Published var collapsedProjects: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: "collapsedProjects") ?? [])
+
+    func setCollapsed(_ path: String, _ collapsed: Bool) {
+        guard collapsedProjects.contains(path) != collapsed else { return }
+        if collapsed { collapsedProjects.insert(path) } else { collapsedProjects.remove(path) }
+        UserDefaults.standard.set(Array(collapsedProjects), forKey: "collapsedProjects")
+    }
+
     // MARK: - Pinning
 
     /// Pinned chats sit at the top of their project, above everything the last

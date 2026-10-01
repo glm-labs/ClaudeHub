@@ -17,6 +17,7 @@ extension Notification.Name {
     static let activeAccountChanged = Notification.Name("ClaudeHub.activeAccountChanged")
     /// A notification banner was clicked: bring that session forward.
     static let focusTab = Notification.Name("ClaudeHub.focusTab")
+    static let toggleSidebar = Notification.Name("ClaudeHub.toggleSidebar")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -110,6 +111,10 @@ struct ClaudeHubApp: App {
                 .keyboardShortcut(.delete, modifiers: .command)
             }
             CommandGroup(after: .sidebar) {
+                Button("Show/Hide Sidebar") {
+                    NotificationCenter.default.post(name: .toggleSidebar, object: nil)
+                }
+                .keyboardShortcut("b", modifiers: .command)
                 Button("Open Tab Beside") {
                     NotificationCenter.default.post(name: .splitActiveTab, object: nil)
                 }

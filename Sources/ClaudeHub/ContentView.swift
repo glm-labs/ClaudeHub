@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var showMCPManager = false
     @State private var showHiddenSessions = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var pendingDeletion: [ClaudeSession] = []
     @State private var deletionScope = ""
     @State private var deleteError: String?
@@ -199,6 +200,11 @@ struct ContentView: View {
         // Split in two on purpose: one chain carrying every observer defeats
         // the type-checker, and the error it gives says nothing about why.
         window
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
+            withAnimation(.easeOut(duration: 0.2)) {
+                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
+        }
         .confirmationDialog(deleteTitle, isPresented: deleteConfirmationBinding, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) { confirmDeletion() }
                 .keyboardShortcut(.defaultAction)
@@ -217,7 +223,7 @@ struct ContentView: View {
     }
 
     private var window: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detail
@@ -328,7 +334,14 @@ struct ContentView: View {
     private var sidebar: some View {
         List(selection: $selectedSessionID) {
             ForEach(filteredProjects) { project in
-                Section {
+                // Expansion is ours, not the system's: the sidebar's own
+                // hover-to-fold toggle sat under the ⊕ and could leave a
+                // project folded with no visible way back. A search shows
+                // every match whatever is folded.
+                Section(isExpanded: Binding(
+                    get: { !searchText.isEmpty || !store.collapsedProjects.contains(project.path) },
+                    set: { store.setCollapsed(project.path, !$0) }
+                )) {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
@@ -341,6 +354,13 @@ struct ContentView: View {
                 } header: {
                     ProjectHeader(
                         project: project,
+                        isExpanded: !store.collapsedProjects.contains(project.path),
+                        toggle: {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                store.setCollapsed(project.path,
+                                                   !store.collapsedProjects.contains(project.path))
+                            }
+                        },
                         repos: git.repos(forProjectAt: project.path),
                         newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
                         menu: { projectMenu(project) }
@@ -1629,6 +1649,8 @@ private struct SessionRow: View {
 
 private struct ProjectHeader<MenuContent: View>: View {
     let project: ClaudeProject
+    let isExpanded: Bool
+    let toggle: () -> Void
     /// The repositories this project folder covers — often several, since a
     /// folder you work in tends to hold a handful of them.
     let repos: [RepoStatus]
@@ -1660,6 +1682,17 @@ private struct ProjectHeader<MenuContent: View>: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 5) {
+            Button(action: toggle) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 12, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 1)
+            .help(isExpanded ? "Fold \(project.name)" : "Show \(project.name)'s sessions")
             // The folder is the real thing: drag it into Finder, Terminal or a
             // file dialog and the project's path travels with it.
             Image(systemName: "folder.fill")
