@@ -159,6 +159,7 @@ package.
 | `⇧⌘W` | Close window |
 | `⌘1`–`⌘9` | Jump to tab |
 | `⌘R` | Rescan sessions |
+| `⌘B` | Show / hide the sidebar |
 | `⌘F` | Find in the conversation (↑/↓ or `⌘G` / `⇧⌘G` step results) |
 | `⌘\` | Open the current tab beside the others (split) |
 | `⌥←` / `⌥→` / `⌥⌫` | Word left / right / delete word in the prompt |
