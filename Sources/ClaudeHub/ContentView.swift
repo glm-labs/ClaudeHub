@@ -89,8 +89,15 @@ struct ContentView: View {
         // A short pause after the last keystroke: searching on every
         // character rebuilt the result list four times to type "they".
         findWork?.cancel()
+        // Cancelling the work item only stops a search that has not started;
+        // the token stops one already reading the file.
+        findToken.cancelled = true
+        let token = SearchToken()
+        findToken = token
         let work = DispatchWorkItem {
-            let found = TranscriptSearch.search(term, in: transcript)
+            let found = TranscriptSearch.search(term, in: transcript,
+                                                isCancelled: { token.cancelled })
+            guard !token.cancelled else { return }
             DispatchQueue.main.async {
                 // The field may have moved on while the file was being read.
                 guard term == findTerm else { return }
@@ -614,6 +621,7 @@ struct ContentView: View {
     /// Why the selected result could not be jumped to, when it could not.
     @State private var jumpNote: String?
     @State private var findWork: DispatchWorkItem?
+    @State private var findToken = SearchToken()
     @State private var paneDragBaseline: [Double]?
 
     private var splitDropStrip: some View {
@@ -1762,4 +1770,11 @@ private struct ProjectHeader<MenuContent: View>: View {
         .help(project.path)
         .contextMenu { menu() }
     }
+}
+
+
+/// Tells a running transcript search that its answer is no longer wanted.
+/// A plain flag: the worst a race can do is one extra line read.
+final class SearchToken: @unchecked Sendable {
+    var cancelled = false
 }

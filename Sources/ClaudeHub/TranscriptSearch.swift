@@ -21,38 +21,55 @@ struct TranscriptMatch: Identifiable, Equatable {
 /// conversation actually is, all of it, including what came before this tab was
 /// even opened.
 enum TranscriptSearch {
-    static func search(_ term: String, in url: URL, limit: Int = 300) -> [TranscriptMatch] {
-        guard !term.isEmpty, let text = try? String(contentsOf: url, encoding: .utf8) else {
-            return []
-        }
+    /// Memory stays flat however large the transcript is: the file is mapped
+    /// rather than loaded, a line is only JSON-parsed when its raw text already
+    /// contains the term, and each line's objects are released before the next.
+    /// Loading and parsing everything up front held hundreds of megabytes per
+    /// search on a 100 MB transcript, and searches typed in quick succession
+    /// stacked those up into gigabytes.
+    static func search(_ term: String, in url: URL, limit: Int = 300,
+                       isCancelled: () -> Bool = { false }) -> [TranscriptMatch] {
+        guard !term.isEmpty,
+              let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return [] }
         var matches: [TranscriptMatch] = []
         var index = 0
+        var start = data.startIndex
+        let newline = UInt8(ascii: "\n")
 
-        for row in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard matches.count < limit,
-                  let data = row.data(using: .utf8),
-                  let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
+        while start < data.endIndex, matches.count < limit {
+            if isCancelled() { return [] }
+            let end = data[start...].firstIndex(of: newline) ?? data.endIndex
+            defer { start = end + 1 }
+            guard end > start else { continue }
 
-            let kind = entry["type"] as? String
-            guard kind == "user" || kind == "assistant" else { continue }
-            // A sidechain is a subagent talking to itself, never to you.
-            guard entry["isSidechain"] as? Bool != true else { continue }
-            guard let message = entry["message"] as? [String: Any],
-                  let body = Self.text(of: message["content"]), !body.isEmpty else { continue }
-            guard body.localizedCaseInsensitiveContains(term) else { continue }
+            autoreleasepool {
+                let raw = data[start..<end]
+                // Cheap test first: the vast majority of lines never get parsed.
+                let text = String(decoding: raw, as: UTF8.self)
+                guard text.localizedCaseInsensitiveContains(term),
+                      let entry = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+                else { return }
 
-            let date = (entry["timestamp"] as? String).flatMap(Self.date)
-            let role = kind == "user" ? "You" : "Claude"
-            for line in body.split(separator: "\n", omittingEmptySubsequences: true)
-            where line.localizedCaseInsensitiveContains(term) {
-                matches.append(TranscriptMatch(id: index,
-                                               role: role,
-                                               date: date,
-                                               line: line.trimmingCharacters(in: .whitespaces),
-                                               full: body))
-                index += 1
-                if matches.count >= limit { break }
+                let kind = entry["type"] as? String
+                guard kind == "user" || kind == "assistant" else { return }
+                // A sidechain is a subagent talking to itself, never to you.
+                guard entry["isSidechain"] as? Bool != true else { return }
+                guard let message = entry["message"] as? [String: Any],
+                      let body = Self.text(of: message["content"]), !body.isEmpty,
+                      body.localizedCaseInsensitiveContains(term) else { return }
+
+                let date = (entry["timestamp"] as? String).flatMap(Self.date)
+                let role = kind == "user" ? "You" : "Claude"
+                for line in body.split(separator: "\n", omittingEmptySubsequences: true)
+                where line.localizedCaseInsensitiveContains(term) {
+                    matches.append(TranscriptMatch(id: index,
+                                                   role: role,
+                                                   date: date,
+                                                   line: line.trimmingCharacters(in: .whitespaces),
+                                                   full: body))
+                    index += 1
+                    if matches.count >= limit { break }
+                }
             }
         }
         return matches
