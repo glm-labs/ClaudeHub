@@ -105,6 +105,13 @@ off.
   opens in its own app (Preview), not as a screenful of bytes
 - 📌 **Pin chats** — right-click → *Pin Chat to Top* keeps the conversation
   you live in above everything newer work pushes up
+- 🖱️ **Cursor chats too** — if Cursor's agent CLI is on the Mac, its chats sit
+  in the same projects as your Claude sessions (marked with a pointer), resume
+  in a tab with one click, and get the same dots, notifications, search,
+  pinning, renaming and deleting. `⌃⌘N` starts one, on whatever model `/model`
+  last chose in one, as with Claude. The footer shows the plan's weekly pool
+  (Grok 4.7 · 4.6 · 4.5 · Composer 2.5) above Claude's limits, and what every
+  other model has cost beside it
 - 🔍 Search across projects and session titles, open the folder in VS Code,
   hand-off to Terminal.app, reveal in Finder, copy resume command
 
@@ -156,6 +163,7 @@ package.
 | `⇧⌘L` | Switch account (`claude auth login`) |
 | `⌘N` | New Claude session in the current folder |
 | `⇧⌘N` | New Claude session in a folder you pick |
+| `⌃⌘N` | New Cursor chat in the current folder |
 | `⌘T` | New shell tab in the current folder |
 | `⌥⌘N` | New window |
 | `⌫` | Delete the selected sessions (asks first) |
@@ -236,6 +244,35 @@ are left for you to send, so a half-typed message is never mangled. MCP servers 
 `~/.claude.json` and per-project `.mcp.json` files; all mutations go through
 `claude mcp add` / `claude mcp remove` so ClaudeHub never hand-edits your
 config.
+
+### Cursor
+
+Cursor's agent CLI (`cursor-agent`, a standalone install or the copy the Cursor
+editor keeps) files each chat in `~/.cursor/chats/<md5 of the folder>/<id>/`,
+with a `meta.json` holding its folder and the title Cursor gave it, and writes
+the conversation to `~/.cursor/projects/<folder>/agent-transcripts/`. ClaudeHub
+reads both and writes neither: a name you give a Cursor chat is kept in
+ClaudeHub, because the agent rewrites its `meta.json` as the chat goes on.
+Deleting a Cursor chat moves its folder and its transcript to the Trash.
+
+A tab runs
+
+```sh
+cursor-agent --trust --auto-review [--resume <chat-id>]
+```
+
+— `--auto-review` is Cursor's auto mode, where safe actions run without asking.
+A new chat does not say which id it took, so its tab finds out from the folder
+the agent creates for it a moment after it starts, and from then on the tab
+and the sidebar row are the same chat.
+
+The agent and the usage footer both run on the Cursor editor's own sign-in:
+ClaudeHub reads its access token from the editor's state database (read-only,
+off the main thread), hands it to Cursor tabs as `CURSOR_AUTH_TOKEN`, and asks
+Cursor's dashboard service for the plan's usage every two minutes. The token is
+never written anywhere. The agent has no "am I busy" signal either, so the dots
+read its screen: `ctrl+c to stop` while it works, `Waiting for you` when it
+asks.
 
 ## Bundled software
 

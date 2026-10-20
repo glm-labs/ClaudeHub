@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var accounts: AccountStore
     @EnvironmentObject var usage: UsageStore
     @EnvironmentObject var git: GitStore
+    @EnvironmentObject var cursorUsage: CursorUsageStore
     @ObservedObject var terminalManager = TerminalManager.shared
     @ObservedObject var updates = UpdateChecker.shared
     @Environment(\.colorScheme) private var colorScheme
@@ -61,7 +62,7 @@ struct ContentView: View {
     /// Where the conversation of the tab in front of you is written down.
     private var activeTranscript: URL? {
         guard let sessionID = tabs.activeTab?.sessionID else { return nil }
-        return session(withID: sessionID)?.fileURL
+        return session(withID: sessionID)?.transcriptURL
     }
 
     private func step(forward: Bool) {
@@ -214,6 +215,12 @@ struct ContentView: View {
         // Split in two on purpose: one chain carrying every observer defeats
         // the type-checker, and the error it gives says nothing about why.
         window
+        .onReceive(NotificationCenter.default.publisher(for: .cursorChatsChanged)) { _ in
+            store.refreshSoon(after: 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .newCursorChatInFolder)) { _ in
+            newCursorChatInChosenFolder()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
             withAnimation(.easeOut(duration: 0.2)) {
                 columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
@@ -267,6 +274,7 @@ struct ContentView: View {
             // The probe needs a folder Claude Code already trusts, so it waits
             // for the first scan — off the sidebar's own update cycle.
             usage.startPolling { store.projects.first?.path }
+            cursorUsage.start()
         }
 
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -279,6 +287,7 @@ struct ContentView: View {
             // The limits are not polled behind a window nobody is watching, so
             // coming back to it is when they are worth re-reading.
             usage.refresh()
+            cursorUsage.refresh()
         }
         .onChange(of: store.projects) { _, projects in
             // A ⌘N tab is titled after its folder until the transcript exists.
@@ -443,9 +452,24 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 420)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                // Cursor's plan first, so Claude's bars stay beside the Claude
+                // account they belong to.
+                if cursorUsage.isAvailable {
+                    UsageBars(readout: cursorUsage.readout,
+                              showsAccount: false,
+                              title: cursorUsage.planName.map { "Cursor · \($0)" } ?? "Cursor",
+                              labels: ("Week", "Other"),
+                              about: """
+                                  Week: the pool your Cursor plan includes, which \
+                                  \(CursorUsageStore.includedModels) draw on. Other: every other \
+                                  model, which does not.
+                                  """,
+                              refresh: { cursorUsage.refresh() })
+                }
                 UsageBars(readout: usageReadout,
                           showsAccount: usageReadout.account
                               != (accounts.activeProfile ?? accounts.current?.email),
+                          title: cursorUsage.isAvailable ? "Claude" : nil,
                           refresh: {
                     usage.refreshByHand()
                     accounts.refreshLimits(force: true)
@@ -708,7 +732,9 @@ struct ContentView: View {
             }
             // A chat started a moment ago has no transcript to write to yet.
             .disabled(activeChat == nil)
-            .help("Rename this chat")
+            .help(activeChat?.isCursor == true
+                  ? "Rename this chat — the name is kept in ClaudeHub; Cursor's own list keeps its name"
+                  : "Rename this chat")
         }
     }
 
@@ -746,7 +772,7 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
-        if tabs.activeTab?.isConversation == true {
+        if tabs.activeTab?.isChat == true {
             ToolbarItem(placement: .navigation) { renameControl }
         }
 
@@ -767,7 +793,8 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
             }
-            .disabled(activeChat == nil)
+            // zoetrope draws Claude Code transcripts; Cursor's are another shape.
+            .disabled(activeChat == nil || activeChat?.isCursor == true)
             .help("Watch this session as a flow graph, beside the conversation")
 
             Menu {
@@ -789,10 +816,16 @@ struct ContentView: View {
             Menu {
                 Section(TabsModel.folderName(tabs.currentFolder)) {
                     Button("New Claude Session") { newSession() }
+                    if CursorAgent.isInstalled {
+                        Button("New Cursor Chat") { newCursorChat() }
+                    }
                     Button("New Terminal") { tabs.openNewTab() }
                 }
                 Divider()
                 Button("New Claude Session in Folder…") { newSessionInChosenFolder() }
+                if CursorAgent.isInstalled {
+                    Button("New Cursor Chat in Folder…") { newCursorChatInChosenFolder() }
+                }
                 if !store.projects.isEmpty {
                     Section("Start in project") {
                         ForEach(store.projects.prefix(10)) { project in
@@ -840,7 +873,7 @@ struct ContentView: View {
                 paneStack
             }
             .navigationTitle(tab.title)
-            .navigationSubtitle(tab.cwd)
+            .navigationSubtitle(tab.isCursor ? "\(tab.cwd) · Cursor" : tab.cwd)
             .modifier(HidesTitle(hidden: isRenaming(tab)))
             // Going to another tab is clicking elsewhere too.
             .onChange(of: tab.id) { _, _ in commitRename() }
@@ -855,6 +888,9 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                     if let recent = store.projects.first {
                         Button("New Session in \(recent.name)") { newSession(in: recent.path) }
+                    }
+                    if CursorAgent.isInstalled {
+                        Button("New Cursor Chat…") { newCursorChatInChosenFolder() }
                     }
                 }
             }
@@ -881,11 +917,28 @@ struct ContentView: View {
         newSession(in: url.path)
     }
 
+    /// ⌃⌘N — a Cursor chat on whatever model `/model` last chose in one.
+    private func newCursorChat(in folder: String? = nil) {
+        tabs.openNewCursorChat(cwd: folder)
+    }
+
+    private func newCursorChatInChosenFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the folder for the new Cursor chat"
+        panel.prompt = "Start Chat"
+        panel.directoryURL = URL(fileURLWithPath: tabs.currentFolder)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        newCursorChat(in: url.path)
+    }
+
     // MARK: - Menus
 
     @ViewBuilder
     private func sessionMenu(_ session: ClaudeSession) -> some View {
-        if !accounts.tokenProfiles.isEmpty {
+        if !session.isCursor, !accounts.tokenProfiles.isEmpty {
             Menu("Resume as") {
                 ForEach(accounts.tokenProfiles, id: \.self) { profile in
                     Button(accounts.describe(profile: profile)) {
@@ -907,13 +960,21 @@ struct ContentView: View {
         }
         Divider()
         Button("New Session in This Folder") { newSession(in: session.cwd) }
+        if CursorAgent.isInstalled {
+            Button("New Cursor Chat in This Folder") { newCursorChat(in: session.cwd) }
+        }
         Button("New Terminal in This Folder") { tabs.openNewTab(cwd: session.cwd) }
         Divider()
-        Button("Watch as Flow Graph") { openGraph(session, alongside: false) }
-        Button("Watch Alongside") { openGraph(session, alongside: true) }
-        Divider()
+        if !session.isCursor {
+            Button("Watch as Flow Graph") { openGraph(session, alongside: false) }
+            Button("Watch Alongside") { openGraph(session, alongside: true) }
+            Divider()
+        }
         if Self.vsCodeURL != nil {
             Button("Open in VS Code") { openInVSCode(session.cwd) }
+        }
+        if CursorAgent.editorURL != nil {
+            Button("Open in Cursor") { CursorAgent.openInEditor(session.cwd) }
         }
         Button("Open in Terminal.app") { openInTerminalApp(session) }
         Button("Reveal Folder in Finder") {
@@ -939,10 +1000,16 @@ struct ContentView: View {
     @ViewBuilder
     private func projectMenu(_ project: ClaudeProject) -> some View {
         Button("New Session in This Project") { newSession(in: project.path) }
+        if CursorAgent.isInstalled {
+            Button("New Cursor Chat in This Project") { newCursorChat(in: project.path) }
+        }
         Button("New Terminal in This Project") { tabs.openNewTab(cwd: project.path) }
         Divider()
         if Self.vsCodeURL != nil {
             Button("Open in VS Code") { openInVSCode(project.path) }
+        }
+        if CursorAgent.editorURL != nil {
+            Button("Open in Cursor") { CursorAgent.openInEditor(project.path) }
         }
         Button("Reveal in Finder") {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.path)
@@ -968,7 +1035,11 @@ struct ContentView: View {
     }
 
     private var deleteMessage: String {
-        let running = pendingDeletion.filter { terminalManager.isRunning($0.id) }.count
+        // The tab is not always named after the chat — a Cursor tab, or one
+        // running as another account — so it is found by the chat it holds.
+        let running = pendingDeletion.filter { session in
+            tabs.tab(forSessionID: session.id).map { terminalManager.isRunning($0.id) } ?? false
+        }.count
         var text = "Deleting \(deletionScope) moves "
             + (pendingDeletion.count == 1 ? "the transcript" : "their transcripts") + " to the Trash. "
             + "The chat disappears from ClaudeHub and can no longer be resumed."
@@ -1032,6 +1103,7 @@ struct ContentView: View {
     /// into its own pane beside the conversation. A running session is
     /// followed at its live edge; a finished one replays from the start.
     private func openGraph(_ session: ClaudeSession, alongside: Bool) {
+        guard !session.isCursor else { return }
         let command: String
         if let zoe = TerminalManager.shared.zoePath {
             let running = tabs.tab(forSessionID: session.id)
@@ -1066,10 +1138,16 @@ struct ContentView: View {
             .appendingPathComponent("Library/Application Support/ClaudeHub")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let script = folder.appendingPathComponent("resume-\(session.id).command")
+        // Cursor's agent runs on its own sign-in there (`cursor-agent login`):
+        // the editor's token is handed to tabs in this window, never written
+        // into a file.
+        let resume = session.isCursor
+            ? CursorAgent.command(chat: session.id) ?? "echo 'The Cursor agent is not installed.'"
+            : "exec \(session.resumeCommand)"
         let body = """
         #!/bin/zsh
         cd \(ClaudeSession.shellQuote(session.cwd)) || exit 1
-        exec \(session.resumeCommand)
+        \(resume)
         """
         do {
             try body.write(to: script, atomically: true, encoding: .utf8)
@@ -1149,7 +1227,13 @@ private struct TabStrip: View {
                             activate: { tabs.show(tab.id) },
                             splitOff: { tabs.splitOff(tab.id) },
                             canSplit: tabs.canSplit,
-                            restart: { terminalManager.relaunch(tab) },
+                            restart: {
+                                if tab.isCursor {
+                                    tabs.restartCursorChat(tab.id)
+                                } else {
+                                    terminalManager.relaunch(tab)
+                                }
+                            },
                             close: { tabs.close(tab.id) }
                         )
                         // Drop a tab on one of its neighbours to put it there,
@@ -1451,6 +1535,11 @@ private struct TabChip: View {
 
     @State private var hovering = false
 
+    private var runsAs: String {
+        if tab.isCursor { return "Cursor chat" }
+        return account.map { "Running as \($0)" } ?? "Running as the signed-in account"
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             // Everything but the close button is the drag handle: a chip that
@@ -1493,18 +1582,16 @@ private struct TabChip: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .contentShape(Rectangle())
         .clickable()
-        .help("\(tab.cwd)\n\(account.map { "Running as \($0)" } ?? "Running as the signed-in account")")
+        .help("\(tab.cwd)\n\(runsAs)")
         .onTapGesture(perform: activate)
         .contextMenu {
             if canSplit {
                 Button("Open Beside") { splitOff() }
             }
-            Text(fellBackFrom.map { "Wanted \($0) — running on the signed-in account" }
-                 ?? account.map { "Running as \($0)" }
-                 ?? "Running as the signed-in account")
-            Button(tab.sessionID == nil
-                   ? "Restart Tab"
-                   : "Restart as \(accountLabel)") { restart() }
+            Text(fellBackFrom.map { "Wanted \($0) — running on the signed-in account" } ?? runsAs)
+            Button(tab.isConversation
+                   ? "Restart as \(accountLabel)"
+                   : "Restart Tab") { restart() }
             Button("Close Tab") { close() }
         }
     }
@@ -1518,11 +1605,16 @@ private struct TabChip: View {
                 }
                 .buttonStyle(.plain)
                 .help("Session ended — restart")
-            } else if tab.isConversation {
+            } else if tab.isChat {
                 ActivityDot(activity: activity, size: 6)
                     .opacity(isActive || hasFocus || activity.pulses ? 1 : 0.55)
             } else {
                 Image(systemName: "terminal")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            if tab.isCursor {
+                Image(systemName: "cursorarrow")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -1779,6 +1871,13 @@ private struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // A Cursor chat among Claude's, in the same project.
+            if session.isCursor {
+                Image(systemName: "cursorarrow")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("Cursor chat")
+            }
             // Says why this chat is sitting above older work it did not out-run.
             if isPinned {
                 Image(systemName: "pin.fill")

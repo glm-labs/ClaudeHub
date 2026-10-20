@@ -21,6 +21,9 @@ final class DroppableTerminalView: LocalProcessTerminalView {
     /// to a shell it means quoted-insert, which is not something to send one
     /// on a guess.
     var takesImagePastes = false
+    /// Runs Cursor's agent: Shift+Enter, a tap in the input and the colours
+    /// all work a little differently there — see `TerminalManager`.
+    var isCursorAgent = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -41,6 +44,18 @@ final class DroppableTerminalView: LocalProcessTerminalView {
         }
         return types
     }()
+
+    // MARK: Selecting
+
+    /// In a Cursor chat, selecting text copies it, the way the standalone
+    /// CursorHub did. A tap that only moves the caret selects nothing, so the
+    /// clipboard stays as it was.
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        guard isCursorAgent, let text = getSelection(), !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
 
     // MARK: Pastes
 

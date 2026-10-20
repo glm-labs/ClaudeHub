@@ -1,5 +1,11 @@
 import Foundation
 
+/// Which command-line agent a conversation belongs to.
+enum ChatAgent: Hashable {
+    case claude
+    case cursor
+}
+
 struct ClaudeSession: Identifiable, Hashable {
     let id: String          // session UUID (jsonl filename)
     var title: String
@@ -7,7 +13,17 @@ struct ClaudeSession: Identifiable, Hashable {
     /// When Claude last answered here — read from the transcript, not from
     /// the file's mtime, which every open, resume or background pass bumps.
     let lastActivity: Date
+    /// Claude's transcript. For a Cursor chat, the chat's own folder: that is
+    /// what `--resume` opens, and the readable transcript lives elsewhere.
     let fileURL: URL
+    var agent: ChatAgent = .claude
+    /// Where the Cursor agent writes this chat's conversation out, if it has.
+    var cursorTranscript: URL? = nil
+
+    var isCursor: Bool { agent == .cursor }
+
+    /// The conversation as text, for searching it.
+    var transcriptURL: URL? { isCursor ? cursorTranscript : fileURL }
 
     var resumeCommand: String {
         "cd \(ClaudeSession.shellQuote(cwd)) && claude --resume \(id)"
@@ -17,6 +33,11 @@ struct ClaudeSession: Identifiable, Hashable {
     /// sidecar folder next to it (tool results), and the session's env dir.
     /// Deleting a chat should not leave these behind.
     var artifactURLs: [URL] {
+        // A Cursor chat is its folder, which holds what resuming needs, and
+        // the transcript folder the agent writes beside the project.
+        if isCursor {
+            return [fileURL] + [cursorTranscript?.deletingLastPathComponent()].compactMap { $0 }
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [
             fileURL,

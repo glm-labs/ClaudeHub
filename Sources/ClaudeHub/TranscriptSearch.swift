@@ -3,7 +3,7 @@ import Foundation
 /// One line of the conversation that matched.
 struct TranscriptMatch: Identifiable, Equatable {
     let id: Int
-    /// "You" or "Claude" — who wrote it.
+    /// "You", "Claude" or "Cursor" — who wrote it.
     let role: String
     let date: Date?
     /// The line the term is on, for the result list.
@@ -50,16 +50,21 @@ enum TranscriptSearch {
                       let entry = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
                 else { return }
 
-                let kind = entry["type"] as? String
+                // Claude Code says who wrote a line in `type`. The Cursor
+                // agent has no `type` on its messages, only a `role`.
+                let cursor = entry["type"] == nil
+                let kind = entry["type"] as? String ?? entry["role"] as? String
                 guard kind == "user" || kind == "assistant" else { return }
                 // A sidechain is a subagent talking to itself, never to you.
                 guard entry["isSidechain"] as? Bool != true else { return }
                 guard let message = entry["message"] as? [String: Any],
-                      let body = Self.text(of: message["content"]), !body.isEmpty,
+                      let body = cursor ? CursorAgent.spokenText(of: message["content"])
+                                        : Self.text(of: message["content"]),
+                      !body.isEmpty,
                       body.localizedCaseInsensitiveContains(term) else { return }
 
                 let date = (entry["timestamp"] as? String).flatMap(Self.date)
-                let role = kind == "user" ? "You" : "Claude"
+                let role = kind == "user" ? "You" : (cursor ? "Cursor" : "Claude")
                 for line in body.split(separator: "\n", omittingEmptySubsequences: true)
                 where line.localizedCaseInsensitiveContains(term) {
                     matches.append(TranscriptMatch(id: index,

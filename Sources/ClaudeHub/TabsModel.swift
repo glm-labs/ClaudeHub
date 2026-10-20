@@ -9,13 +9,15 @@ enum TerminalTabKind: Hashable {
     case command([String])   // one-shot `claude <args…>`, e.g. auth login
     case script(String)      // one-shot shell command, e.g. `git diff`
     case diff(String)        // the changes in a repository, side by side
+    case cursor(String?)     // `cursor-agent --resume <chat-id>`, or a fresh chat until it has one
 }
 
 struct TerminalTab: Identifiable, Hashable {
     let id: String              // session UUID for Claude sessions, "sh-…"/"cmd-…" otherwise
     var title: String
     let cwd: String
-    let kind: TerminalTabKind
+    /// Settles once for a new Cursor chat, when the agent has picked its id.
+    var kind: TerminalTabKind
     /// Runs as this saved account instead of the signed-in one (see TokenStore).
     var profile: String? = nil
     /// Runs as the CLI's own login even while a saved account is active — the
@@ -34,6 +36,7 @@ struct TerminalTab: Identifiable, Hashable {
     var sessionID: String? {
         switch kind {
         case .resume(let id), .newSession(let id): return id
+        case .cursor(let id): return id
         case .shell, .command, .script, .diff: return nil
         }
     }
@@ -44,13 +47,23 @@ struct TerminalTab: Identifiable, Hashable {
         return false
     }
 
-    /// A live Claude conversation — the tabs slash commands can be sent to.
+    /// A live Claude conversation — the tabs slash commands can be sent to,
+    /// and the ones that move when the Claude account changes.
     var isConversation: Bool {
         switch kind {
         case .resume, .newSession: return true
-        case .shell, .command, .script, .diff: return false
+        case .shell, .command, .script, .diff, .cursor: return false
         }
     }
+
+    var isCursor: Bool {
+        if case .cursor = kind { return true }
+        return false
+    }
+
+    /// A conversation with either agent: what gets a status dot, a name you
+    /// can change, and an image when you paste one.
+    var isChat: Bool { isConversation || isCursor }
 }
 
 final class TabsModel: ObservableObject {
@@ -76,6 +89,7 @@ final class TabsModel: ObservableObject {
     }
 
     func openSession(_ session: ClaudeSession, profile: String? = nil, signedIn: Bool = false) {
+        if session.isCursor { return openCursorChat(session) }
         // Same session under another account is a separate tab, not a clash.
         let id = Self.tabID(session: session.id, profile: signedIn ? "signed-in" : profile)
         if tabs.contains(where: { $0.id == id }) {
@@ -120,6 +134,78 @@ final class TabsModel: ObservableObject {
             profile: profile,
             hasProvisionalTitle: true
         ))
+    }
+
+    // MARK: - Cursor
+
+    /// Resumes a Cursor chat, or brings forward the tab it is already in.
+    func openCursorChat(_ session: ClaudeSession) {
+        if let open = tab(forSessionID: session.id) { return show(open.id) }
+        append(TerminalTab(
+            id: "cursor-\(session.id)",
+            title: session.title,
+            cwd: session.cwd,
+            kind: .cursor(session.id),
+            chatName: session.title
+        ))
+    }
+
+    /// ⌃⌘N: a fresh Cursor chat in `cwd` (the current folder by default).
+    func openNewCursorChat(cwd: String? = nil) {
+        let folder = cwd ?? currentFolder
+        append(TerminalTab(
+            id: "cursor-new-\(UUID().uuidString)",
+            title: "New Cursor chat · \(Self.folderName(folder))",
+            cwd: folder,
+            kind: .cursor(nil),
+            hasProvisionalTitle: true
+        ))
+        watchForCursorChats()
+    }
+
+    /// A new Cursor chat restarted is another new chat, which the tab has to
+    /// go and find again.
+    func restartCursorChat(_ id: String) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }), tabs[index].isCursor else { return }
+        TerminalManager.shared.relaunch(tabs[index])
+        if tabs[index].kind == .cursor(nil) { watchForCursorChats() }
+    }
+
+    private var cursorClaimTimer: Timer?
+
+    /// A new Cursor tab learns which chat it is from the folder the agent
+    /// creates for it — see `CursorAgent.newChat`. Checked each second while a
+    /// tab is still waiting, and given up on after a minute: an agent that has
+    /// not written its chat by then is not going to.
+    private func watchForCursorChats() {
+        guard cursorClaimTimer == nil else { return }
+        cursorClaimTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.claimCursorChats()
+        }
+    }
+
+    private func claimCursorChats() {
+        var taken = Set(tabs.compactMap(\.sessionID))
+        var waiting = false
+        for tab in tabs where tab.kind == .cursor(nil) {
+            // Not on screen yet, so not started: its chat does not exist.
+            guard let started = TerminalManager.shared.launchDate(of: tab.id) else {
+                waiting = true
+                continue
+            }
+            guard Date().timeIntervalSince(started) < 60 else { continue }
+            waiting = true
+            guard let chat = CursorAgent.newChat(in: tab.cwd, since: started, excluding: taken),
+                  let index = tabs.firstIndex(where: { $0.id == tab.id }) else { continue }
+            taken.insert(chat)
+            tabs[index].kind = .cursor(chat)
+            publishOpenSessions()
+            NotificationCenter.default.post(name: .cursorChatsChanged, object: nil)
+        }
+        if !waiting {
+            cursorClaimTimer?.invalidate()
+            cursorClaimTimer = nil
+        }
     }
 
     /// ⌘T: plain shell tab in `cwd` (the current folder by default).

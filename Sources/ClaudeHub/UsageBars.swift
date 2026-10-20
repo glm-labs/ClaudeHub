@@ -18,11 +18,18 @@ struct UsageReadout: Equatable {
     var updated: Date?
 }
 
-/// The 5-hour and weekly limits, always on screen in the sidebar footer.
+/// The 5-hour and weekly limits, always on screen in the sidebar footer —
+/// and, in the same shape, the Cursor plan's two pools above them.
 struct UsageBars: View {
     let readout: UsageReadout
     /// False when the footer's account chip already names this account.
     var showsAccount = true
+    /// Which plan these are, once the footer holds more than one.
+    var title: String? = nil
+    var labels = (first: "5h", second: "Week")
+    /// What the bars measure, for the tooltip, where the Claude wording about
+    /// accounts and tabs would not be true.
+    var about: String? = nil
     let refresh: () -> Void
 
     private static let barWidth: CGFloat = 90
@@ -33,8 +40,15 @@ struct UsageBars: View {
             // reset the panel phrased in some way we could not turn into a date.
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 VStack(alignment: .leading, spacing: 5) {
-                    row("5h", readout.session, at: context.date)
-                    row("Week", readout.week, at: context.date)
+                    if let title {
+                        Text(title.uppercased())
+                            .font(.system(size: 9, weight: .semibold))
+                            .tracking(0.5)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    row(labels.first, readout.session, at: context.date)
+                    row(labels.second, readout.week, at: context.date)
                     // Named when these are NOT the account chip's numbers (a tab
                     // running as someone else), or when the reading is old
                     // enough that its age matters. Same account twice in one
@@ -99,6 +113,7 @@ struct UsageBars: View {
 
     private var helpText: String {
         if let problem = readout.problem { return "\(problem)\n\nClick to try again." }
+        if let about { return "\(about)\n\(age)  Click ↻ to read them now." }
         return """
             The limits of \(readout.account) — the account this tab is running as, \
             which is not always the account new sessions start on.

@@ -125,6 +125,7 @@ final class SessionStore: ObservableObject {
             pinnedSessionIDs.subtract(deleted)
             persistPinned()
         }
+        CursorAgent.forgetNames(deleted)
         return failed
     }
 
@@ -190,6 +191,12 @@ final class SessionStore: ObservableObject {
             for session in found {
                 byCwd[session.cwd, default: []].append(session)
             }
+        }
+
+        // Cursor's chats file under the same folders, so a project shows
+        // everything that was said about it, whichever agent said it.
+        for session in CursorAgent.sessions() {
+            byCwd[session.cwd, default: []].append(session)
         }
 
         return byCwd.map { cwd, sessions in
@@ -470,6 +477,19 @@ final class SessionStore: ObservableObject {
             .components(separatedBy: .newlines)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespaces)
+
+        // A Cursor chat's name is kept here, not in the agent's files — see
+        // `CursorAgent.names`.
+        if session.isCursor {
+            CursorAgent.setName(name, for: session.id)
+            if name.isEmpty { return refresh() }
+            for p in projects.indices {
+                if let s = projects[p].sessions.firstIndex(where: { $0.id == session.id }) {
+                    projects[p].sessions[s].title = name
+                }
+            }
+            return
+        }
 
         try Self.appendTitleLine(name, sessionID: session.id, to: session.fileURL)
 

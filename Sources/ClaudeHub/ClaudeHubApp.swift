@@ -68,6 +68,7 @@ struct ClaudeHubApp: App {
     @StateObject private var accounts = AccountStore()
     @StateObject private var usage = UsageStore()
     @StateObject private var git = GitStore()
+    @StateObject private var cursorUsage = CursorUsageStore()
 
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -77,6 +78,7 @@ struct ClaudeHubApp: App {
                 .environmentObject(accounts)
                 .environmentObject(usage)
                 .environmentObject(git)
+                .environmentObject(cursorUsage)
         }
         .defaultSize(width: 1200, height: 760)
         .commands {
@@ -192,6 +194,17 @@ private struct NewItemCommands: View {
             NotificationCenter.default.post(name: .newClaudeSessionInFolder, object: nil)
         }
         .keyboardShortcut("n", modifiers: [.command, .shift])
+
+        Button("New Cursor Chat") {
+            tabs.openNewCursorChat()
+        }
+        .keyboardShortcut("n", modifiers: [.command, .control])
+        .disabled(!CursorAgent.isInstalled)
+
+        Button("New Cursor Chat in Folder…") {
+            NotificationCenter.default.post(name: .newCursorChatInFolder, object: nil)
+        }
+        .disabled(!CursorAgent.isInstalled)
 
         Button("New Terminal Tab") { tabs.openNewTab() }
             .keyboardShortcut("t", modifiers: .command)

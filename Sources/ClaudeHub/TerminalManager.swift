@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftTerm
 import UniformTypeIdentifiers
 import UserNotifications
@@ -112,6 +113,15 @@ final class TerminalManager: NSObject, ObservableObject {
     /// The folder each live terminal started in, for resolving relative paths
     /// Claude prints — `src/Foo.swift:42` means that file in that folder.
     private var folders: [String: String] = [:]
+    /// When each terminal's process was started, so a new Cursor tab can tell
+    /// its own chat from the ones that were already there.
+    private var launchedAt: [String: Date] = [:]
+    /// The tabs running Cursor's agent rather than Claude Code. It draws its
+    /// screen differently, so it is read differently.
+    private var cursorTabs: Set<String> = []
+    /// Where a plain click in a Cursor chat went down, so a drag still selects
+    /// text and only a tap moves the caret.
+    private var clickDown: (view: ObjectIdentifier, point: NSPoint)?
 
     /// Terminal text size, shared by every tab and remembered across launches.
     @Published private(set) var fontSize: CGFloat = {
@@ -133,7 +143,10 @@ final class TerminalManager: NSObject, ObservableObject {
             if event.keyCode == 36,  // Return
                event.modifierFlags.contains(.shift),
                let terminal = NSApp.keyWindow?.firstResponder as? TerminalView {
-                terminal.send(txt: "\u{1b}\r")
+                // The Cursor agent wants it the way it asks other terminals to
+                // be set up for it: Shift+Enter as the CSI u sequence.
+                let cursor = (terminal as? DroppableTerminalView)?.isCursorAgent == true
+                terminal.send(txt: cursor ? "\u{1b}[13;2u" : "\u{1b}\r")
                 return nil
             }
             // ⌃V is Claude Code's own image paste: the keystroke is all the
@@ -191,15 +204,23 @@ final class TerminalManager: NSObject, ObservableObject {
         // prints `src/Foo.swift:42` all day long. URLs open in the browser.
         // A monitor rather than an override: SwiftTerm's mouseDown is not
         // open to subclasses, same as its keyDown.
-        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            guard let self, event.modifierFlags.contains(.command),
+        //
+        // A plain tap in a Cursor chat's input line moves the caret there, which
+        // Claude Code does by itself and the Cursor agent does not.
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
+            guard let self, !self.terminals.isEmpty,
                   let window = event.window,
                   var view = window.contentView?.hitTest(event.locationInWindow) else { return event }
             while !(view is LocalProcessTerminalView), let parent = view.superview { view = parent }
             guard let terminalView = view as? LocalProcessTerminalView,
-                  let tabID = self.terminals.first(where: { $0.value === terminalView })?.key,
-                  self.openLink(at: event, in: terminalView, tabID: tabID) else { return event }
-            return nil
+                  let tabID = self.terminals.first(where: { $0.value === terminalView })?.key else { return event }
+            if event.modifierFlags.contains(.command) {
+                guard event.type == .leftMouseDown,
+                      self.openLink(at: event, in: terminalView, tabID: tabID) else { return event }
+                return nil
+            }
+            if self.cursorTabs.contains(tabID) { self.placeCaretIfTapped(event, in: terminalView) }
+            return event
         }
         activityTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             self?.pollActivity()
@@ -299,6 +320,85 @@ final class TerminalManager: NSObject, ObservableObject {
             .contains { type.conforms(to: $0) }
     }
 
+    // MARK: - A tap in a Cursor chat's input
+
+    /// Moves the caret to where you tapped in the line you are typing, by
+    /// sending the arrow keys that would take it there. A drag is left alone,
+    /// so it still selects, and so is a tap anywhere above the input: an
+    /// up-arrow there would walk back into the previous message.
+    private func placeCaretIfTapped(_ event: NSEvent, in view: LocalProcessTerminalView) {
+        guard event.clickCount < 2 else { return }
+        let point = view.convert(event.locationInWindow, from: nil)
+        if event.type == .leftMouseDown {
+            clickDown = (ObjectIdentifier(view), point)
+            return
+        }
+        guard let down = clickDown, down.view == ObjectIdentifier(view) else { return }
+        clickDown = nil
+        guard hypot(point.x - down.point.x, point.y - down.point.y) < 5, !view.selectionActive else { return }
+        // Scrolled back, the row under the pointer is history, not the input.
+        let atBottom = view.scrollThumbsize == 0
+            || view.scrollPosition >= 0.999
+            || view.scrollThumbsize > 0.99
+        guard atBottom else { return }
+
+        let terminal = view.getTerminal()
+        let rows = max(terminal.rows, 1)
+        let cols = max(terminal.cols, 1)
+        let cell = Self.cellSize(of: view)
+        let fromTop = view.isFlipped ? point.y : view.bounds.height - point.y
+        let row = min(rows - 1, max(0, Int(fromTop / cell.height)))
+        let col = min(cols - 1, max(0, Int(point.x / cell.width)))
+        let caret = terminal.getCursorLocation()
+        let lines = (0..<rows).map { row in
+            terminal.getLine(row: row).map { Self.readable($0.translateToString(trimRight: true)) } ?? ""
+        }
+        guard lines.indices.contains(caret.y),
+              Self.inputRows(around: caret.y, in: lines).contains(row) else { return }
+
+        var keys = ""
+        let vertical = row - caret.y
+        if vertical < 0 { keys += String(repeating: "\u{1b}[A", count: min(-vertical, 12)) }
+        if vertical > 0 { keys += String(repeating: "\u{1b}[B", count: min(vertical, 12)) }
+        let horizontal = col - caret.x
+        if horizontal < 0 { keys += String(repeating: "\u{1b}[D", count: min(-horizontal, 500)) }
+        if horizontal > 0 { keys += String(repeating: "\u{1b}[C", count: min(horizontal, 500)) }
+        if !keys.isEmpty { view.send(txt: keys) }
+    }
+
+    /// The cell size SwiftTerm lays its grid out with, from the font — the view
+    /// is a few points taller than the grid, and dividing it by the row count
+    /// lands a tap on the bottom row, which is the input, one row off.
+    private static func cellSize(of view: TerminalView) -> (width: CGFloat, height: CGFloat) {
+        let font = view.font
+        let height = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        let width = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        return (max(1, width), max(1, height))
+    }
+
+    /// The input is the block of lines around the caret, bounded by a blank
+    /// line, a rule, or the status line the agent draws under its prompt.
+    private static func inputRows(around caret: Int, in lines: [String]) -> ClosedRange<Int> {
+        func boundary(_ line: String) -> Bool {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { return true }
+            let lower = trimmed.lowercased()
+            let status = ["ctrl+c to stop", "waiting for you", "waiting for confirmation",
+                          "press ctrl+c", "reviewing changes", "esc to "]
+            if status.contains(where: { lower.contains($0) }) { return true }
+            let borders = CharacterSet(charactersIn: "╭╮╰╯│─┌┐└┘├┤┬┴┼━┃")
+            let words = trimmed.unicodeScalars.filter {
+                !borders.contains($0) && !CharacterSet.whitespaces.contains($0)
+            }
+            return words.count < 2 && trimmed.count > 3
+        }
+        var low = caret
+        var high = caret
+        while low > 0, low > caret - 8, !boundary(lines[low - 1]) { low -= 1 }
+        while high + 1 < lines.count, high < caret + 8, !boundary(lines[high + 1]) { high += 1 }
+        return low...high
+    }
+
     /// Terminals whose process is still alive (used by quit protection).
     var runningCount: Int {
         terminals.keys.filter { !deadTabs.contains($0) }.count
@@ -346,7 +446,8 @@ final class TerminalManager: NSObject, ObservableObject {
 
         let view = DroppableTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view.tabID = tab.id
-        view.takesImagePastes = tab.isConversation
+        view.takesImagePastes = tab.isChat
+        view.isCursorAgent = tab.isCursor
         view.processDelegate = self
         view.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         applyTheme(to: view)
@@ -363,7 +464,12 @@ final class TerminalManager: NSObject, ObservableObject {
         // Deliberately the cached token only: a keychain panel here would
         // freeze the app mid-layout, and a session that quietly starts on the
         // wrong account is worse than one that starts late.
-        if !tab.pinnedToSignedIn,
+        //
+        // A Cursor chat has no Claude account at all. It runs on the Cursor
+        // editor's sign-in, read ahead of time for the same reason.
+        if tab.isCursor {
+            if let token = CursorAgent.cachedToken { env["CURSOR_AUTH_TOKEN"] = token }
+        } else if !tab.pinnedToSignedIn,
            let profile = tab.profile ?? TokenStore.activeProfile,
            let token = TokenStore.cachedToken(for: profile) {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -395,6 +501,10 @@ final class TerminalManager: NSObject, ObservableObject {
             // The shell stays afterwards, so the output can be scrolled and
             // the command run again.
             start(view, envArray, "\(command); echo; exec /bin/zsh -i -l", in: tab.cwd)
+        case .cursor(let chat):
+            let missing = "echo 'The Cursor agent is not installed. Install it with:'; echo; "
+                + "echo '  curl https://cursor.com/install -fsS | bash'; echo; exec /bin/zsh -i -l"
+            start(view, envArray, CursorAgent.command(chat: chat) ?? missing, in: tab.cwd)
         case .shell, .diff:
             // A diff tab has no process; it never asks for a terminal, and the
             // case is here only because the switch must cover it.
@@ -411,8 +521,13 @@ final class TerminalManager: NSObject, ObservableObject {
         deadTabs.remove(tab.id)
         terminals[tab.id] = view
         folders[tab.id] = tab.cwd
+        launchedAt[tab.id] = Date()
+        if tab.isCursor { cursorTabs.insert(tab.id) } else { cursorTabs.remove(tab.id) }
         return view
     }
+
+    /// When the tab's process started, nil while it has not.
+    func launchDate(of tabID: String) -> Date? { launchedAt[tabID] }
 
     /// Whether Claude Code has already written a transcript for this session.
     /// The project folder is derived from the cwd by a scheme we would rather
@@ -441,6 +556,7 @@ final class TerminalManager: NSObject, ObservableObject {
     /// The account this tab runs as: the one it launched with once it is
     /// running, the one it would launch with before that.
     func profile(of tab: TerminalTab) -> String? {
+        if tab.isCursor { return nil }
         if terminals[tab.id] != nil { return launchedProfile[tab.id] }
         if tab.pinnedToSignedIn { return nil }
         return tab.profile ?? TokenStore.activeProfile
@@ -463,7 +579,9 @@ final class TerminalManager: NSObject, ObservableObject {
             // through typing should survive that — including the pastes in it,
             // which are replayed from what went in rather than read off the
             // screen, where they are only a stand-in.
-            let plan = Self.draft(of: view).flatMap { PasteMemory.shared.plan(for: $0, tab: tab.id) }
+            // Only Claude Code's prompt can be read back that way.
+            let plan = tab.isCursor ? nil
+                : Self.draft(of: view).flatMap { PasteMemory.shared.plan(for: $0, tab: tab.id) }
             pendingRestores[tab.id] = plan.map { Restore(steps: $0) }
             // The stand-ins were numbered by the session that is ending; the
             // replay binds the new ones. The image files stay: the plan holds
@@ -474,6 +592,7 @@ final class TerminalManager: NSObject, ObservableObject {
         }
         launchedProfile[tab.id] = nil
         fellBack[tab.id] = nil
+        launchedAt[tab.id] = nil
         deadTabs.remove(tab.id)
         generation += 1
     }
@@ -548,6 +667,8 @@ final class TerminalManager: NSObject, ObservableObject {
 
     func closeTerminal(for tabID: String) {
         folders[tabID] = nil
+        launchedAt[tabID] = nil
+        cursorTabs.remove(tabID)
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
             trackForReaping(view)
             view.terminate()
@@ -648,7 +769,8 @@ final class TerminalManager: NSObject, ObservableObject {
             }
             // One read, two questions asked of it.
             let screen = Self.visibleText(of: view)
-            let state = Self.classify(screen)
+            let cursor = cursorTabs.contains(id)
+            let state = cursor ? Self.classifyCursor(screen) : Self.classify(screen)
             if state == .busy, activity[id] != .busy { busySince[id] = Date() }
 
             // The moment an answer lands: working a second ago, quiet now.
@@ -659,6 +781,9 @@ final class TerminalManager: NSObject, ObservableObject {
                 let worked = busySince[id].map { Date().timeIntervalSince($0) } ?? 0
                 busySince[id] = nil
                 if !NSApp.isActive { announce(id, after: worked) }
+                // The agent names a chat once it has answered, and only then
+                // does the chat count as one in its own files.
+                if cursor { NotificationCenter.default.post(name: .cursorChatsChanged, object: nil) }
             }
             next[id] = state
 
@@ -668,7 +793,7 @@ final class TerminalManager: NSObject, ObservableObject {
             // It is read off the screen, and the screen keeps it long after the
             // window has reset, so it counts only while the reset it names is
             // still ahead and the session is not plainly working.
-            let notice = state == .busy ? nil : Self.limitNotice(in: screen)
+            let notice = state == .busy || cursor ? nil : Self.limitNotice(in: screen)
             if limitNotices[id] != notice { limitNotices[id] = notice }
         }
         if next != activity { activity = next }
@@ -836,6 +961,18 @@ final class TerminalManager: NSObject, ObservableObject {
     private static func classify(_ screen: String) -> TerminalActivity {
         if screen.contains("esc to interrupt") { return .busy }
         if screen.contains("Do you want to") { return .needsInput }
+        return .idle
+    }
+
+    /// The Cursor agent says "ctrl+c to stop" under its prompt while it works,
+    /// and asks with "Waiting for you" or "waiting for confirmation". Only the
+    /// bottom of what it has drawn counts: a finished answer can quote either.
+    private static func classifyCursor(_ screen: String) -> TerminalActivity {
+        var lines = screen.split(separator: "\n", omittingEmptySubsequences: false)
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        let tail = lines.suffix(12).joined(separator: "\n").lowercased()
+        if tail.contains("waiting for confirmation") || tail.contains("waiting for you") { return .needsInput }
+        if tail.contains("ctrl+c to stop") || tail.contains("reviewing changes") { return .busy }
         return .idle
     }
 
@@ -1065,13 +1202,20 @@ final class TerminalManager: NSObject, ObservableObject {
 
     private func applyTheme(to view: LocalProcessTerminalView) {
         let dark = Self.isDarkMode
+        // The Cursor agent writes what it says in the plain foreground and
+        // what it does in grey. On the Claude palette the two came out too
+        // close to tell apart, so in the dark its chats get a brighter white
+        // and lighter greys.
+        let cursor = (view as? DroppableTerminalView)?.isCursorAgent == true
         view.nativeBackgroundColor = Self.terminalBackground
         view.nativeForegroundColor = dark
-            ? NSColor(calibratedWhite: 0.87, alpha: 1)
+            ? NSColor(calibratedWhite: cursor ? 0.97 : 0.87, alpha: 1)
             : NSColor(calibratedWhite: 0.13, alpha: 1)
         view.caretColor = NSColor(calibratedRed: 0.85, green: 0.35, blue: 0.16, alpha: 1)
         view.selectedTextBackgroundColor = NSColor.selectedTextBackgroundColor
-        view.installColors(dark ? Self.darkAnsiPalette : Self.lightAnsiPalette)
+        view.installColors(dark
+                           ? (cursor ? Self.cursorDarkAnsiPalette : Self.darkAnsiPalette)
+                           : Self.lightAnsiPalette)
     }
 
     /// Re-theme cached terminals when the system appearance flips.
@@ -1121,6 +1265,27 @@ final class TerminalManager: NSObject, ObservableObject {
         rgb(0x3B, 0x8E, 0xEA), // bright blue
         rgb(0xD6, 0x70, 0xD6), // bright magenta
         rgb(0x29, 0xB8, 0xDB), // bright cyan
+        rgb(0xFF, 0xFF, 0xFF), // bright white
+    ]
+
+    /// The dark palette for Cursor chats: the greys lifted, the colours a
+    /// step brighter, so the agent's actions read as asides and not as noise.
+    private static let cursorDarkAnsiPalette: [SwiftTerm.Color] = [
+        rgb(0x5C, 0x5C, 0x5C), // black
+        rgb(0xF1, 0x4C, 0x4C), // red
+        rgb(0x23, 0xD1, 0x8B), // green
+        rgb(0xF5, 0xF5, 0x43), // yellow
+        rgb(0x3B, 0x8E, 0xEA), // blue
+        rgb(0xD6, 0x70, 0xD6), // magenta
+        rgb(0x29, 0xB8, 0xDB), // cyan
+        rgb(0xF7, 0xF7, 0xF7), // white
+        rgb(0x8A, 0x8A, 0x8A), // bright black
+        rgb(0xFF, 0x6B, 0x6B), // bright red
+        rgb(0x5A, 0xF7, 0x8E), // bright green
+        rgb(0xFF, 0xE6, 0x6D), // bright yellow
+        rgb(0x6A, 0xB0, 0xFF), // bright blue
+        rgb(0xF0, 0x92, 0xF0), // bright magenta
+        rgb(0x5C, 0xE1, 0xFF), // bright cyan
         rgb(0xFF, 0xFF, 0xFF), // bright white
     ]
 
