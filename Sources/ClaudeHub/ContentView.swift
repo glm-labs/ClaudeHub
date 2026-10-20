@@ -365,14 +365,31 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
+        // Every row is a leaf, headers included: no Section, no DisclosureGroup.
+        // Those make the sidebar an outline, and SwiftUI's outline has crashed
+        // the app when a group changed shape while it was being redrawn — a
+        // folded project is a section with no rows left.
         List(selection: $selectedSessionIDs) {
             ForEach(filteredProjects) { project in
-                // Expansion is ours, not the system's: the sidebar's own
+                // Folding is ours, not the system's: the sidebar's own
                 // hover-to-fold toggle sat under the ⊕ and could leave a
                 // project folded with no visible way back. A search shows
                 // every match whatever is folded.
-                Section {
-                    if !searchText.isEmpty || !store.collapsedProjects.contains(project.path) {
+                ProjectHeader(
+                    project: project,
+                    isExpanded: !store.collapsedProjects.contains(project.path),
+                    toggle: {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            store.setCollapsed(project.path,
+                                               !store.collapsedProjects.contains(project.path))
+                        }
+                    },
+                    repos: git.repos(forProjectAt: project.path),
+                    newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
+                    menu: { projectMenu(project) }
+                )
+                .selectionDisabled()
+                if !searchText.isEmpty || !store.collapsedProjects.contains(project.path) {
                     ForEach(project.sessions) { session in
                         SessionRow(session: session,
                                    activity: activity(of: session),
@@ -390,33 +407,18 @@ struct ContentView: View {
                                 }
                             }
                     }
-                    }
-                } header: {
-                    ProjectHeader(
-                        project: project,
-                        isExpanded: !store.collapsedProjects.contains(project.path),
-                        toggle: {
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                store.setCollapsed(project.path,
-                                                   !store.collapsedProjects.contains(project.path))
-                            }
-                        },
-                        repos: git.repos(forProjectAt: project.path),
-                        newSession: { tabs.openNewSession(cwd: project.path); store.refreshSoon() },
-                        menu: { projectMenu(project) }
-                    )
                 }
-                // The system's own hover-to-fold has no visible handle and can
-                // leave a project stuck shut; the chevron does folding instead.
-                .collapsible(false)
-                .textCase(nil)
             }
 
             if !git.dirtyRepos.isEmpty {
                 // Not selectable: the sidebar's selection is a session, and a
                 // repository row painted in selection blue turns a list of file
                 // names into something you cannot read.
-                Section("Changes") {
+                Group {
+                    Text("Changes")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
                     ForEach(git.dirtyRepos) { repo in
                         RepoRow(
                             repo: repo,
@@ -1738,94 +1740,123 @@ private struct RepoRow: View {
 
     private static let shown = 6
 
+    // One row that grows, not a DisclosureGroup: inside a List that is a group
+    // with a row of its own, which the sidebar has to keep in step with git.
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(repo.files.prefix(Self.shown)) { file in
-                    HStack(spacing: 6) {
-                        Text(file.mark)
-                            .font(.system(size: 10, weight: .semibold).monospaced())
-                            .foregroundStyle(Self.color(for: file.mark))
-                            .frame(width: 9, alignment: .leading)
-                        Text(file.path)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .contentShape(Rectangle())
-                    .clickable()
-                    .onTapGesture { openFile(file.path) }
-                    .help("\(file.path)\nClick to open this file in VS Code")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 5) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 12, height: 14)
+                        .contentShape(Rectangle())
                 }
-                if repo.files.count > Self.shown {
-                    Text("+ \(repo.files.count - Self.shown) more")
+                .buttonStyle(.borderless)
+                .padding(.top, 1)
+                .help(expanded ? "Fold \(repo.name)" : "Show what changed in \(repo.name)")
+                label
+            }
+            if expanded {
+                details
+                    .padding(.leading, 17)
+            }
+        }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(repo.files.prefix(Self.shown)) { file in
+                HStack(spacing: 6) {
+                    Text(file.mark)
+                        .font(.system(size: 10, weight: .semibold).monospaced())
+                        .foregroundStyle(Self.color(for: file.mark))
+                        .frame(width: 9, alignment: .leading)
+                    Text(file.path)
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                // Three fit the sidebar; the Finder is a right-click away,
-                // where a thing you reach for once a week belongs.
-                HStack(spacing: 6) {
-                    Button("Session", action: newSession)
-                        .help("New Claude session in \(repo.name)")
-                    Button("Diff", action: showDiff)
-                        .help("The changes side by side, in a tab")
-                    if canOpenInEditor {
-                        Button("VS Code", action: openInEditor)
-                            .help("Open \(repo.name) in VS Code")
-                    }
-                }
-                .controlSize(.small)
-                .buttonStyle(.bordered)
-                .padding(.top, 3)
+                .contentShape(Rectangle())
+                .clickable()
+                .onTapGesture { openFile(file.path) }
+                .help("\(file.path)\nClick to open this file in VS Code")
             }
+            if repo.files.count > Self.shown {
+                Text("+ \(repo.files.count - Self.shown) more")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            // Three fit the sidebar; the Finder is a right-click away,
+            // where a thing you reach for once a week belongs.
+            HStack(spacing: 6) {
+                Button("Session", action: newSession)
+                    .help("New Claude session in \(repo.name)")
+                Button("Diff", action: showDiff)
+                    .help("The changes side by side, in a tab")
+                if canOpenInEditor {
+                    Button("VS Code", action: openInEditor)
+                        .help("Open \(repo.name) in VS Code")
+                }
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
             .padding(.top, 3)
-            .padding(.bottom, 2)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(repo.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    Text("\(repo.pending)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.pending)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.pending.opacity(0.14), in: Capsule())
-                }
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 9, weight: .medium))
-                    Text(repo.branch)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+        }
+        .padding(.top, 3)
+        .padding(.bottom, 2)
+    }
+
+    private var label: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(repo.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text("\(repo.pending)")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color.pending)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.pending.opacity(0.14), in: Capsule())
+            }
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 9, weight: .medium))
+                Text(repo.branch)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("·")
+                // An unpushed branch is the state you want to notice before
+                // you close the laptop, so it does not read as an aside.
+                Text(repo.syncLabel)
+                    .foregroundStyle(repo.isUnpushed ? Color.pending : Color.secondary)
+                if let age = repo.age {
                     Text("·")
-                    // An unpushed branch is the state you want to notice before
-                    // you close the laptop, so it does not read as an aside.
-                    Text(repo.syncLabel)
-                        .foregroundStyle(repo.isUnpushed ? Color.pending : Color.secondary)
-                    if let age = repo.age {
-                        Text("·")
-                        Text(age)
-                            .help("The oldest of these changes was written \(age) ago")
-                    }
+                    Text(age)
+                        .help("The oldest of these changes was written \(age) ago")
                 }
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
             }
-            .clickable()
-            .help(repo.root)
-            .contextMenu {
-                Button("New Session in \(repo.name)", action: newSession)
-                Button("Diff Side by Side", action: showDiff)
-                Button("git diff in a Terminal", action: showRawDiff)
-                if canOpenInEditor { Button("Open in VS Code", action: openInEditor) }
-                Divider()
-                Button("Reveal in Finder", action: reveal)
-            }
+            .font(.system(size: 10))
+            .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .clickable()
+        .onTapGesture { withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() } }
+        .help(repo.root)
+        .contextMenu {
+            Button("New Session in \(repo.name)", action: newSession)
+            Button("Diff Side by Side", action: showDiff)
+            Button("git diff in a Terminal", action: showRawDiff)
+            if canOpenInEditor { Button("Open in VS Code", action: openInEditor) }
+            Divider()
+            Button("Reveal in Finder", action: reveal)
         }
     }
 

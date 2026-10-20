@@ -19,7 +19,9 @@ final class SessionStore: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let projects = Self.scan(root: root)
             DispatchQueue.main.async {
-                self.projects = projects
+                // Coming back to the window rescans; a sidebar that has not
+                // changed should not be redrawn for it.
+                if projects != self.projects { self.projects = projects }
                 self.isLoading = false
             }
         }
