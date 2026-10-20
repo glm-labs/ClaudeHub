@@ -19,6 +19,11 @@ struct ContentView: View {
     @State private var pendingDeletion: [ClaudeSession] = []
     @State private var deletionScope = ""
     @State private var deleteError: String?
+    /// The chat whose name is being edited in the title bar, if any.
+    @State private var renamingSessionID: String?
+    @State private var renameDraft = ""
+    @State private var renameError: String?
+    @FocusState private var renameFieldFocused: Bool
 
     /// Matches the SwiftTerm palette background in TerminalManager.
     private var terminalBackground: SwiftUI.Color {
@@ -228,6 +233,14 @@ struct ContentView: View {
             Button("OK", role: .cancel) { deleteError = nil }
         } message: {
             Text(deleteError ?? "")
+        }
+        .alert("Could not rename", isPresented: Binding(
+            get: { renameError != nil },
+            set: { if !$0 { renameError = nil } }
+        )) {
+            Button("OK", role: .cancel) { renameError = nil }
+        } message: {
+            Text(renameError ?? "")
         }
     }
 
@@ -656,13 +669,87 @@ struct ContentView: View {
             } isTargeted: { splitTargeted = $0 }
     }
 
-    /// The session the graph button would draw: the active tab's conversation.
-    private var activeGraphSession: ClaudeSession? {
+    /// The active tab's conversation, once the sidebar knows it: what the
+    /// graph button draws and what the pencil renames.
+    private var activeChat: ClaudeSession? {
         tabs.activeTab?.sessionID.flatMap(session(withID:))
+    }
+
+    // MARK: - Renaming
+
+    private func isRenaming(_ tab: TerminalTab) -> Bool {
+        renamingSessionID != nil && tab.sessionID == renamingSessionID
+    }
+
+    /// The pencil, or while it is in use, the name itself in a field where
+    /// the title stood. Return keeps the new name, Esc keeps the old one, and
+    /// clicking elsewhere keeps what you typed, as Finder does. An empty name
+    /// gives the chat back the one Claude gave it.
+    @ViewBuilder
+    private var renameControl: some View {
+        if let tab = tabs.activeTab, isRenaming(tab) {
+            TextField("Chat name", text: $renameDraft)
+                .textFieldStyle(.roundedBorder)
+                .font(.headline)
+                .frame(width: 340)
+                .focused($renameFieldFocused)
+                .onSubmit(commitRename)
+                .onExitCommand(perform: cancelRename)
+                .onChange(of: renameFieldFocused) { _, focused in
+                    if !focused { commitRename() }
+                }
+                .onAppear {
+                    // A toolbar field is not in the window yet on the first pass.
+                    DispatchQueue.main.async { renameFieldFocused = true }
+                }
+        } else {
+            Button(action: startRename) {
+                Image(systemName: "pencil")
+            }
+            // A chat started a moment ago has no transcript to write to yet.
+            .disabled(activeChat == nil)
+            .help("Rename this chat")
+        }
+    }
+
+    private func startRename() {
+        guard let session = activeChat else { return }
+        renameDraft = session.title
+        renamingSessionID = session.id
+    }
+
+    private func cancelRename() {
+        renamingSessionID = nil
+        focusActiveTerminal()
+    }
+
+    private func commitRename() {
+        guard let id = renamingSessionID else { return }
+        renamingSessionID = nil
+        defer { focusActiveTerminal() }
+        guard let session = session(withID: id) else { return }
+        let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name != session.title else { return }
+        do {
+            try store.rename(session, to: name)
+        } catch {
+            renameError = "“\(session.title)” keeps its name. \(error.localizedDescription)"
+        }
+    }
+
+    /// Back to typing in the chat, the way it was before the pencil.
+    private func focusActiveTerminal() {
+        guard let tab = tabs.activeTab else { return }
+        let terminal = terminalManager.terminal(for: tab)
+        DispatchQueue.main.async { terminal.window?.makeFirstResponder(terminal) }
     }
 
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
+        if tabs.activeTab?.isConversation == true {
+            ToolbarItem(placement: .navigation) { renameControl }
+        }
+
         ToolbarItemGroup(placement: .primaryAction) {
             if Self.vsCodeURL != nil {
                 Button {
@@ -674,13 +761,13 @@ struct ContentView: View {
             }
 
             Button {
-                if let session = activeGraphSession {
+                if let session = activeChat {
                     openGraph(session, alongside: true)
                 }
             } label: {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
             }
-            .disabled(activeGraphSession == nil)
+            .disabled(activeChat == nil)
             .help("Watch this session as a flow graph, beside the conversation")
 
             Menu {
@@ -754,6 +841,9 @@ struct ContentView: View {
             }
             .navigationTitle(tab.title)
             .navigationSubtitle(tab.cwd)
+            .modifier(HidesTitle(hidden: isRenaming(tab)))
+            // Going to another tab is clicking elsewhere too.
+            .onChange(of: tab.id) { _, _ in commitRename() }
         } else {
             ContentUnavailableView {
                 Label("ClaudeHub", systemImage: "terminal")
@@ -1654,6 +1744,21 @@ private struct RepoRow: View {
         case "?": return .secondary
         case "U": return .pending
         default: return .pending
+        }
+    }
+}
+
+/// While a chat's name is being edited, the field stands where the title was
+/// rather than beside a copy of the old name. macOS 14 cannot take the title
+/// out of the toolbar, so there the field sits next to it.
+private struct HidesTitle: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.toolbar(removing: hidden ? .title : nil)
+        } else {
+            content
         }
     }
 }

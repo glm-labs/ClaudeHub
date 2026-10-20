@@ -2,7 +2,7 @@ import Foundation
 
 struct ClaudeSession: Identifiable, Hashable {
     let id: String          // session UUID (jsonl filename)
-    let title: String
+    var title: String
     let cwd: String
     /// When Claude last answered here — read from the transcript, not from
     /// the file's mtime, which every open, resume or background pass bumps.
@@ -23,6 +23,12 @@ struct ClaudeSession: Identifiable, Hashable {
             fileURL.deletingPathExtension(),                                  // <uuid>/ sidecar
             home.appendingPathComponent(".claude/session-env/\(id)"),
         ]
+    }
+
+    /// Where Claude Code keeps the name you gave the chat, next to the
+    /// transcript, so the name outlives the transcript's tail moving on.
+    var customTitleURL: URL {
+        fileURL.deletingPathExtension().appendingPathComponent("custom-title.json")
     }
 
     static func shellQuote(_ s: String) -> String {

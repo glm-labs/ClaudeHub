@@ -264,7 +264,8 @@ final class SessionStore: ObservableObject {
         let named = findCwd(in: handle, head: head, size: size)
         guard let cwd = named ?? fallbackCwd else { return nil }
 
-        let title = lastJSONString(in: tail, key: "aiTitle")
+        let title = customTitle(in: body, transcript: file)
+            ?? lastJSONString(in: tail, key: "aiTitle")
             ?? lastJSONString(in: head, key: "aiTitle")
             ?? firstUserPrompt(in: head)
         guard let title = title ?? (named != nil ? "Session \(id.prefix(8))" : nil) else {
@@ -390,7 +391,10 @@ final class SessionStore: ObservableObject {
         extractString(in: text, key: key, fromEnd: true)
     }
 
-    private static func extractString(in text: String, key: String, fromEnd: Bool) -> String? {
+    /// `keepEmpty` tells a key that is there with an empty value apart from a
+    /// key that is not there at all.
+    private static func extractString(in text: String, key: String, fromEnd: Bool,
+                                      keepEmpty: Bool = false) -> String? {
         let needle = "\"\(key)\":\""
         let range = fromEnd
             ? text.range(of: needle, options: .backwards)
@@ -414,9 +418,120 @@ final class SessionStore: ObservableObject {
         if let data = "[\"\(raw)\"]".data(using: .utf8),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [String],
            let decoded = arr.first {
-            return decoded.isEmpty ? nil : decoded
+            return decoded.isEmpty && !keepEmpty ? nil : decoded
         }
-        return raw.isEmpty ? nil : raw
+        return raw.isEmpty && !keepEmpty ? nil : raw
+    }
+
+    // MARK: - Names
+
+    /// The name you gave the chat, with `/rename` in Claude Code or the pencil
+    /// here. It wins over the one Claude made up.
+    ///
+    /// Claude Code keeps it in two places: a line in the transcript, which it
+    /// copies forward to the end as the file grows so the tail always has it,
+    /// and a small file next to the transcript. The line is the latest word
+    /// when we can see it. An empty one means the name was taken back, and the
+    /// chat goes by Claude's name again.
+    private static func customTitle(in body: String, transcript: URL) -> String? {
+        if let named = extractString(in: body, key: "customTitle", fromEnd: true, keepEmpty: true) {
+            return named.isEmpty ? nil : named
+        }
+        let sidecar = transcript.deletingPathExtension().appendingPathComponent("custom-title.json")
+        guard let data = try? Data(contentsOf: sidecar),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let named = (object["customTitle"] as? String)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !named.isEmpty else { return nil }
+        return named
+    }
+
+    enum RenameError: LocalizedError {
+        case transcript(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .transcript(let reason): return "The transcript could not be written: \(reason)."
+            }
+        }
+    }
+
+    /// Names a chat the way Claude Code's own `/rename` does, so both read the
+    /// same name: a `custom-title` line appended to the transcript, and the
+    /// same name in the file next to it. An empty name takes the name back.
+    ///
+    /// This is safe while the chat is running in a tab. Claude Code appends to
+    /// the same file, but one short write in append mode cannot land inside a
+    /// line of its own, and before it copies its metadata forward it reads the
+    /// name back from the end of the file, so it takes ours on rather than
+    /// writing its old one over it.
+    func rename(_ session: ClaudeSession, to newName: String) throws {
+        let name = newName
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+
+        try Self.appendTitleLine(name, sessionID: session.id, to: session.fileURL)
+
+        // The sidecar is Claude Code's copy, not the one we read first; a
+        // failure here leaves the transcript line to do the job.
+        let fm = FileManager.default
+        let sidecar = session.customTitleURL
+        if name.isEmpty {
+            try? fm.removeItem(at: sidecar)
+        } else if let json = try? JSONSerialization.data(withJSONObject: ["customTitle": name],
+                                                         options: [.withoutEscapingSlashes]) {
+            let folder = sidecar.deletingLastPathComponent()
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+            if (try? json.write(to: sidecar, options: .atomic)) != nil {
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+            }
+        }
+
+        if name.isEmpty {
+            // Which name Claude gave it is in the transcript, not here.
+            refresh()
+            return
+        }
+        for p in projects.indices {
+            if let s = projects[p].sessions.firstIndex(where: { $0.id == session.id }) {
+                projects[p].sessions[s].title = name
+            }
+        }
+    }
+
+    /// One line, written in a single append so it cannot interleave with the
+    /// lines Claude Code is writing to the same file.
+    private static func appendTitleLine(_ name: String, sessionID: String, to file: URL) throws {
+        // Same shape and key order as the line Claude Code writes itself.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        guard let quoted = try? encoder.encode(name),
+              let value = String(data: quoted, encoding: .utf8) else {
+            throw RenameError.transcript("the name could not be encoded")
+        }
+        var line = "{\"type\":\"custom-title\",\"customTitle\":\(value),\"sessionId\":\"\(sessionID)\"}\n"
+
+        // A line cut short would swallow ours into it; start on a fresh one.
+        if let handle = try? FileHandle(forReadingFrom: file) {
+            defer { try? handle.close() }
+            if let end = try? handle.seekToEnd(), end > 0 {
+                try? handle.seek(toOffset: end - 1)
+                if let last = try? handle.read(upToCount: 1), last != Data([0x0A]) {
+                    line = "\n" + line
+                }
+            }
+        }
+
+        let fd = open(file.path, O_WRONLY | O_APPEND)
+        guard fd >= 0 else { throw RenameError.transcript(String(cString: strerror(errno))) }
+        defer { close(fd) }
+        let bytes = Array(line.utf8)
+        let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        guard written == bytes.count else {
+            throw RenameError.transcript(written < 0 ? String(cString: strerror(errno)) : "short write")
+        }
     }
 
     private static func firstUserPrompt(in head: String) -> String? {

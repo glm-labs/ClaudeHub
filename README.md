@@ -75,6 +75,10 @@ off.
   the `claude mcp` CLI, so config stays canonical)
 - 🙈 **Hide sessions** — declutter the sidebar without deleting anything;
   hidden sessions stay resumable and can be unhidden anytime
+- ✏️ **Rename chats** — the pencil in the title bar turns the title into a
+  field; Return keeps the new name, Esc the old one. It is the same name
+  `/rename` sets inside Claude Code, so the `claude --resume` picker agrees
+  with the sidebar, and a `/rename` typed in the chat shows up here as well
 - 🌓 **Light & dark** — terminal theme follows the system appearance, live
 - 🛟 **Quit protection** — warns you before ⌘Q kills running sessions
 - 🔄 **Auto-update** — checks GitHub releases; one click downloads, installs,

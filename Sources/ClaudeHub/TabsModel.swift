@@ -25,6 +25,9 @@ struct TerminalTab: Identifiable, Hashable {
     /// True while `title` is the "New session · folder" placeholder: a fresh
     /// session has no name until Claude has written its transcript.
     var hasProvisionalTitle = false
+    /// The chat's name as this tab last took it from the sidebar, so a new
+    /// name can replace it without touching what else the title carries.
+    var chatName: String? = nil
 
     /// The Claude conversation this tab is — resumed, or started here with a
     /// session id we picked ourselves. Nil for shells and one-shot commands.
@@ -94,7 +97,8 @@ final class TabsModel: ObservableObject {
             cwd: session.cwd,
             kind: .resume(session.id),
             profile: profile,
-            pinnedToSignedIn: signedIn
+            pinnedToSignedIn: signedIn,
+            chatName: session.title
         ))
     }
 
@@ -209,21 +213,32 @@ final class TabsModel: ObservableObject {
         }
     }
 
-    /// Gives a freshly started tab the chat's own name once the sidebar has
-    /// scanned the transcript Claude wrote for it.
+    /// Gives a tab the chat's own name: a freshly started one once the sidebar
+    /// has scanned the transcript Claude wrote for it, and any open chat once
+    /// it has been renamed, here or with `/rename` in the chat itself.
     func adoptSessionTitles(from projects: [ClaudeProject]) {
-        guard tabs.contains(where: \.hasProvisionalTitle) else { return }
+        guard tabs.contains(where: { $0.sessionID != nil }) else { return }
         var titles: [String: String] = [:]
         for project in projects {
             for session in project.sessions { titles[session.id] = session.title }
         }
-        for index in tabs.indices where tabs[index].hasProvisionalTitle {
+        for index in tabs.indices {
             guard let sessionID = tabs[index].sessionID,
-                  let title = titles[sessionID] else { continue }
-            tabs[index].title = tabs[index].profile
-                .map { "\(title) · \(Self.shortLabel($0))" } ?? title
-            TerminalManager.shared.tabTitles[tabs[index].id] = tabs[index].title
-            tabs[index].hasProvisionalTitle = false
+                  let title = titles[sessionID],
+                  title != tabs[index].chatName else { continue }
+            var tab = tabs[index]
+            if tab.hasProvisionalTitle {
+                tab.title = tab.profile.map { "\(title) · \(Self.shortLabel($0))" } ?? title
+                tab.hasProvisionalTitle = false
+            } else if let old = tab.chatName, tab.title.hasPrefix(old) {
+                // What follows the name, the account the tab runs as, stays.
+                tab.title = title + tab.title.dropFirst(old.count)
+            } else {
+                continue
+            }
+            tab.chatName = title
+            tabs[index] = tab
+            TerminalManager.shared.tabTitles[tab.id] = tab.title
         }
     }
 
