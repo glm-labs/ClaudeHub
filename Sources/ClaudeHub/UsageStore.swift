@@ -79,10 +79,18 @@ final class UsageStore: ObservableObject {
     /// Bumped whenever the probe is thrown away (a switch, a timeout), so the
     /// read loop of the old session cannot tear down or answer for the new one.
     private var generation = 0
+    /// After a reading fails, the hidden session is not started again on the
+    /// next tick. It waits instead, twice as long after each failure, up to half
+    /// an hour. A signed-out CLI never shows limits, and starting Claude Code
+    /// every minute only to see that again costs seconds of CPU each time.
+    private var failedProbes = 0
+    private var restUntil: Date?
+    private let longestRest: TimeInterval = 1800
+    private var resting: Bool { restUntil.map { Date() < $0 } ?? false }
 
     private let interval: TimeInterval = 60
 
-    deinit { probe?.terminate() }
+    deinit { if let probe { ChildReaper.terminate(probe) } }
 
     /// Starts the first read once sessions are known, then every minute.
     func startPolling(folder: @escaping () -> String?) {
@@ -132,7 +140,7 @@ final class UsageStore: ObservableObject {
     /// from the API instead, polled by `AccountStore` — one place, one request,
     /// and no chance of the footer and the account menu disagreeing.
     func refresh() {
-        guard !probeBusy else { return }
+        guard !probeBusy, !resting else { return }
         guard let cwd = folder() else {
             // The first scan may not have landed yet; keep trying briefly
             // rather than going quiet until the next tick.
@@ -151,7 +159,7 @@ final class UsageStore: ObservableObject {
     /// the active one. Reading them is free; the hidden session is not, which
     /// is why it is throttled and stops behind an idle window.
     func refreshSignedInLimits() {
-        guard !probeBusy, NSApplication.shared.isActive else { return }
+        guard !probeBusy, !resting, NSApplication.shared.isActive else { return }
         guard Date().timeIntervalSince(lastProbeAt ?? .distantPast) >= probeInterval else { return }
         guard let cwd = folder() else { return }
         startTerminalProbe(in: cwd)
@@ -352,6 +360,7 @@ final class UsageStore: ObservableObject {
             Self.log(screen)
             teardown()
             probeBusy = false
+            restUntil = Date().addingTimeInterval(longestRest)
             signedInAt = Date()
             signedInError = "The signed-in account reports no usage limits."
             if TokenStore.activeProfile == nil {
@@ -373,6 +382,8 @@ final class UsageStore: ObservableObject {
             signedInAt = Date()
             signedInError = nil
             probeBusy = false
+            failedProbes = 0
+            restUntil = nil
             // The bars follow the active account; this reading is theirs only
             // when that is the account it just measured.
             if TokenStore.activeProfile == nil {
@@ -387,8 +398,8 @@ final class UsageStore: ObservableObject {
             return
         }
         guard Date() < deadline else {
-            // A wedged session is worse than none: drop it and start over next
-            // tick — but say what was on screen instead of it. "Could not read
+            // A wedged session is worse than none: drop it and start over after
+            // a rest — but say what was on screen instead of it. "Could not read
             // /usage" is unfalsifiable; the session's own last words are not.
             let seen = Self.tail(of: screen)
             Self.log(screen)
@@ -470,6 +481,9 @@ final class UsageStore: ObservableObject {
 
     private func fail(_ message: String) {
         probeBusy = false
+        failedProbes += 1
+        let rest = min(interval * pow(2, Double(failedProbes)), longestRest)
+        restUntil = Date().addingTimeInterval(rest)
         signedInError = message
         isProbing = false
         // The bars are only this reading's to speak for when they are showing
@@ -482,14 +496,22 @@ final class UsageStore: ObservableObject {
         // has to be released here or the next reading never starts.
         generation += 1
         probeBusy = false
-        probe?.terminate()
+        if let probe { ChildReaper.terminate(probe) }
         probe = nil
+    }
+
+    /// Asking again on purpose — a switch, the ↻ button, the menu — skips any
+    /// rest left over from earlier failures.
+    private func endRest() {
+        failedProbes = 0
+        restUntil = nil
     }
 
     /// A different account has different limits, so the warm session is no
     /// longer the one to ask.
     func accountChanged() {
         teardown()
+        endRest()
         retries = 0
         forceNextPoll = true
         lastAPIPoll = nil
@@ -510,6 +532,7 @@ final class UsageStore: ObservableObject {
         signedInError = nil
         retries = 0
         lastProbeAt = nil
+        endRest()
         refresh()
     }
 
