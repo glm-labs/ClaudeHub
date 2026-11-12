@@ -82,14 +82,6 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Tabs whose process has exited; their view stays (showing the exit
     /// message) until the tab is closed or explicitly restarted.
     private var deadTabs: Set<String> = []
-    /// The children of closed tabs whose exit nobody has read yet.
-    ///
-    /// SwiftTerm's `terminate()` sends the SIGTERM and then cancels the monitor
-    /// that would have reaped the child, so nothing is left to call `waitpid`
-    /// and the dead shell keeps its slot in the process table. One of those per
-    /// closed tab goes unnoticed; a fortnight of closing tabs and switching
-    /// accounts — which restarts every conversation — is hundreds of them.
-    private var reaping: Set<pid_t> = []
     private(set) var claudePath: String = "claude"
 
     /// The bundled zoetrope binary (Resources/bin/zoe) — the session flow
@@ -587,8 +579,7 @@ final class TerminalManager: NSObject, ObservableObject {
             // replay binds the new ones. The image files stay: the plan holds
             // them.
             PasteMemory.shared.forget(tab: tab.id, deletingImages: false)
-            trackForReaping(view)
-            view.terminate()
+            ChildReaper.terminate(view)
         }
         launchedProfile[tab.id] = nil
         fellBack[tab.id] = nil
@@ -670,8 +661,7 @@ final class TerminalManager: NSObject, ObservableObject {
         launchedAt[tabID] = nil
         cursorTabs.remove(tabID)
         if let view = terminals.removeValue(forKey: tabID), !deadTabs.contains(tabID) {
-            trackForReaping(view)
-            view.terminate()
+            ChildReaper.terminate(view)
         }
         launchedProfile[tabID] = nil
         fellBack[tabID] = nil
@@ -747,7 +737,6 @@ final class TerminalManager: NSObject, ObservableObject {
     /// what the session is showing: while it works it prints an
     /// "esc to interrupt" hint, and permission prompts ask "Do you want to …".
     private func pollActivity() {
-        reapClosedChildren()
         guard !terminals.isEmpty else {
             if !activity.isEmpty { activity = [:] }
             PulseClock.shared.stop()
@@ -808,20 +797,6 @@ final class TerminalManager: NSObject, ObservableObject {
         } else {
             PulseClock.shared.stop()
         }
-    }
-
-    /// Non-blocking, so a child still on its way out simply waits for the next
-    /// beat. Anything other than 0 — reaped now, or gone already — is done with.
-    private func reapClosedChildren() {
-        guard !reaping.isEmpty else { return }
-        var status: Int32 = 0
-        reaping = reaping.filter { waitpid($0, &status, WNOHANG) == 0 }
-    }
-
-    /// Call before `terminate()`: afterwards there is nobody left to ask.
-    private func trackForReaping(_ view: LocalProcessTerminalView) {
-        let pid = view.process.shellPid
-        if pid > 0 { reaping.insert(pid) }
     }
 
     /// Puts a kept prompt back, once the new session has an empty prompt to

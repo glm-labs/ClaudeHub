@@ -145,7 +145,7 @@ struct ClaudeHubApp: App {
                 Button("Usage & Limits") { ClaudeCommands.send("/usage", tabs: tabs) }
                     .keyboardShortcut("u", modifiers: .command)
                     .disabled(!ClaudeCommands.canSend(tabs))
-                Button("Refresh Limits") { usage.refresh() }
+                Button("Refresh Limits") { usage.refreshByHand() }
                 Button("Account & Status") { ClaudeCommands.send("/status", tabs: tabs) }
                     .disabled(!ClaudeCommands.canSend(tabs))
                 Button("Context Left") { ClaudeCommands.send("/context", tabs: tabs) }
