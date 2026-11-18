@@ -245,33 +245,25 @@ final class TerminalManager: NSObject, ObservableObject {
         let cellWidth = view.bounds.width / CGFloat(max(terminal.cols, 1))
         let row = Int(fromTop / cellHeight)
         let col = Int(point.x / cellWidth)
-        guard row >= 0, row < terminal.rows, let line = terminal.getLine(row: row) else { return false }
-        let text = Self.readable(line.translateToString(trimRight: false))
-        guard let token = Self.linkToken(in: text, at: col) else { return false }
-
-        if token.contains("://"), let url = URL(string: token) {
-            NSWorkspace.shared.open(url)
-            return true
+        guard row >= 0, row < terminal.rows else { return false }
+        // A long path is cut over rows, so the rows around the click are read
+        // as well — see `WrappedLink`.
+        let candidates = WrappedLink.candidates(row: row, col: col, width: terminal.cols) { row in
+            terminal.getLine(row: row).map { Self.readable($0.translateToString(trimRight: false)) }
         }
-        return openFile(token, from: folders[tabID] ?? FileManager.default.homeDirectoryForCurrentUser.path)
-    }
-
-    /// The run of path characters around `col`, with the punctuation a
-    /// sentence hangs on it taken off. Nil unless it looks like a path or URL.
-    private static func linkToken(in text: String, at col: Int) -> String? {
-        let chars = Array(text)
-        guard !chars.isEmpty else { return nil }
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-./~:@+%#?=&"))
-        func ok(_ c: Character) -> Bool { c.unicodeScalars.allSatisfy { allowed.contains($0) } }
-        var start = min(max(col, 0), chars.count - 1)
-        guard ok(chars[start]) else { return nil }
-        var end = start
-        while start > 0, ok(chars[start - 1]) { start -= 1 }
-        while end + 1 < chars.count, ok(chars[end + 1]) { end += 1 }
-        var token = String(chars[start...end])
-        while let last = token.last, ".,;:)]}'\"".contains(last) { token.removeLast() }
-        guard token.contains("/") || token.contains(".") else { return nil }
-        return token
+        let folder = folders[tabID] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        for token in candidates {
+            if token.contains("://") {
+                // Only a link something on this Mac can open: a guess at a
+                // join can make up a scheme nothing knows.
+                guard WrappedLink.startsWithScheme(token), let url = URL(string: token),
+                      NSWorkspace.shared.urlForApplication(toOpen: url) != nil else { continue }
+                NSWorkspace.shared.open(url)
+                return true
+            }
+            if openFile(token, from: folder) { return true }
+        }
+        return false
     }
 
     /// `path`, `path:line`, or `path:line:col` — relative to the tab's folder
