@@ -70,13 +70,14 @@ final class TerminalManager: NSObject, ObservableObject {
     /// Per conversation: the agents its transcript says are out — see
     /// `BackgroundWork`.
     private var agentLedgers: [String: AgentLedger] = [:]
-    /// What each conversation had running behind its prompt at the last look.
-    private var backgroundWork: [String: BackgroundWork] = [:]
-    /// When that last went from something to nothing.
-    private var backgroundEndedAt: [String: Date] = [:]
-    /// An agent that reports back hands its session a new turn, and the
-    /// screen takes a moment to show it: a tab is not moved in that moment.
-    private static let backgroundSettle: TimeInterval = 8
+    /// Since when each tab has been seen with nothing going on at all: no
+    /// answer, no question, no work behind its prompt. Nil while something is.
+    private var quietSince: [String: Date] = [:]
+    /// How long a tab has to have been quiet before a switch that waited for
+    /// it moves it. One quiet look proves little: a turn ends a moment before
+    /// the next one starts — an agent reporting back, a queued message — and
+    /// a screen can look quiet for a frame while it is redrawn.
+    private static let quietBeforeMove: TimeInterval = 10
     /// Sessions that answered while you were elsewhere. Cleared by looking at
     /// them, which is the only thing that should clear it.
     @Published private(set) var unread: Set<String> = []
@@ -342,10 +343,7 @@ final class TerminalManager: NSObject, ObservableObject {
         clickDown = nil
         guard hypot(point.x - down.point.x, point.y - down.point.y) < 5, !view.selectionActive else { return }
         // Scrolled back, the row under the pointer is history, not the input.
-        let atBottom = view.scrollThumbsize == 0
-            || view.scrollPosition >= 0.999
-            || view.scrollThumbsize > 0.99
-        guard atBottom else { return }
+        guard Self.isAtBottom(view) else { return }
 
         let terminal = view.getTerminal()
         let rows = max(terminal.rows, 1)
@@ -615,8 +613,7 @@ final class TerminalManager: NSObject, ObservableObject {
 
     private func forgetBackgroundWork(of tabID: String) {
         agentLedgers[tabID] = nil
-        backgroundWork[tabID] = nil
-        backgroundEndedAt[tabID] = nil
+        quietSince[tabID] = nil
     }
 
     /// Moves every open conversation onto the account that is active now.
@@ -662,13 +659,30 @@ final class TerminalManager: NSObject, ObservableObject {
         case .idle, .finished, .stopped, .dead, .background: break
         case .busy, .needsInput: return .busy
         }
+        // The rest is asked afresh, since the last look may be a few seconds
+        // old. What the session says about itself first: it sees what the
+        // screen may not show.
+        let status = sessionStatus(of: tab.id)
         // A quiet prompt is not enough: agents and commands the session left
-        // running end with its process. Asked afresh, since the last look may
-        // be a few seconds old.
+        // running end with its process.
         let work = lookForBackgroundWork(tab.id)
-        if !work.isEmpty { return .background(work) }
-        if let ended = backgroundEndedAt[tab.id],
-           Date().timeIntervalSince(ended) < Self.backgroundSettle { return .busy }
+        var reason: SwitchHold?
+        if !work.isEmpty {
+            reason = .background(work)
+        } else if status == .shell {
+            reason = .background(BackgroundWork(shells: 1))
+        } else if let status, status != .idle {
+            reason = .busy
+        }
+        if let reason {
+            quietSince[tab.id] = nil
+            return reason
+        }
+        guard let since = quietSince[tab.id],
+              Date().timeIntervalSince(since) >= Self.quietBeforeMove else { return .busy }
+        // Without the session's own word there is only the screen, and
+        // scrolled back it shows history rather than the session.
+        if status == nil, !Self.isAtBottom(view) { return .busy }
         return nil
     }
 
@@ -678,11 +692,17 @@ final class TerminalManager: NSObject, ObservableObject {
               let ledger = agentLedgers[tabID] else { return BackgroundWork() }
         // The shell `claude` was exec'd from: the pid is the session's own.
         let shells = view.process.running ? SessionShells.count(under: view.process.shellPid) : 0
-        let work = BackgroundWork(agents: ledger.agentsRunning(shellsRunning: shells > 0),
-                                  shells: shells)
-        if work.isEmpty, backgroundWork[tabID]?.isEmpty == false { backgroundEndedAt[tabID] = Date() }
-        backgroundWork[tabID] = work
-        return work
+        return BackgroundWork(agents: ledger.agentsRunning(shellsRunning: shells > 0), shells: shells)
+    }
+
+    /// What Claude Code says this tab's session is doing — see
+    /// `SessionStatus`. Nil for a Cursor chat, and for a session that has not
+    /// said.
+    private func sessionStatus(of tabID: String) -> SessionStatus? {
+        guard !cursorTabs.contains(tabID), let view = terminals[tabID], !deadTabs.contains(tabID),
+              view.process.running else { return nil }
+        // `claude` is exec'd from the shell it was started with: same pid.
+        return SessionStatus.read(pid: view.process.shellPid, launched: launchedAt[tabID])
     }
 
     /// The account a tab will move to once it can, and why it has not yet.
@@ -817,10 +837,24 @@ final class TerminalManager: NSObject, ObservableObject {
             let screen = Self.visibleText(of: view)
             let cursor = cursorTabs.contains(id)
             var state = cursor ? Self.classifyCursor(screen) : Self.classify(screen)
-            // The prompt is back, but agents it sent off may still be at work:
-            // that session is not waiting for you yet.
-            if state == .idle, agentLedgers[id] != nil, lookForBackgroundWork(id).agents > 0 {
-                state = .background
+            let status = sessionStatus(of: id)
+            var work = BackgroundWork()
+            if state == .idle {
+                // The prompt is back, but agents it sent off may still be at
+                // work: that session is not waiting for you yet.
+                if agentLedgers[id] != nil { work = lookForBackgroundWork(id) }
+                // And the screen can look quiet when the session is not — see
+                // `SessionStatus`.
+                switch status {
+                case .busy?: state = work.agents > 0 ? .background : .busy
+                case .waiting?: state = .needsInput
+                case .shell?, .idle?, nil: if work.agents > 0 { state = .background }
+                }
+            }
+            if state == .idle, work.isEmpty, status == nil || status == .idle {
+                if quietSince[id] == nil { quietSince[id] = Date() }
+            } else {
+                quietSince[id] = nil
             }
             if state.isWorking, activity[id]?.isWorking != true { busySince[id] = Date() }
 
@@ -1011,6 +1045,14 @@ final class TerminalManager: NSObject, ObservableObject {
         if tail.contains("waiting for confirmation") || tail.contains("waiting for you") { return .needsInput }
         if tail.contains("ctrl+c to stop") || tail.contains("reviewing changes") { return .busy }
         return .idle
+    }
+
+    /// Whether the view shows the live screen rather than history you have
+    /// scrolled back to. Every row read off a view is a row as it is shown.
+    private static func isAtBottom(_ view: LocalProcessTerminalView) -> Bool {
+        view.scrollThumbsize == 0
+            || view.scrollPosition >= 0.999
+            || view.scrollThumbsize > 0.99
     }
 
     /// The rows currently on screen, lowest-cost snapshot SwiftTerm offers.
